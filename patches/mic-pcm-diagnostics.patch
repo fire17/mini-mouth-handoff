@@ -1,0 +1,72 @@
+--- a/mini-mouth/src/audio_io.py
++++ b/mini-mouth/src/audio_io.py
+@@ -478,15 +478,65 @@
+ 
+     def __init__(self):
+         self.proc: asyncio.subprocess.Process | None = None
++        self._capture = None
+ 
+     async def start(self) -> None:
+-        self.proc = await asyncio.create_subprocess_exec(
++        proc = await asyncio.create_subprocess_exec(
+             *mic_argv(), stdout=asyncio.subprocess.PIPE,
+-            stderr=asyncio.subprocess.DEVNULL)
++            stderr=asyncio.subprocess.PIPE)
++        self.proc = proc
++        # A watchdog can restart this same Mic object. Carry and diagnostics
++        # belong to one child, so an old exit cannot consume a new child's state.
++        state = {"proc": proc, "carry": b"", "stderr": bytearray(), "stopped": False}
++        self._capture = state
++        drain = asyncio.create_task(self._drain_capture_stderr(state))
++        state["stderr_task"] = drain
++        state["exit_task"] = asyncio.create_task(self._report_capture_exit(state, drain))
+ 
+     async def read(self) -> bytes:
+-        return await self.proc.stdout.read(self.CHUNK)
++        while True:
++            state = self._capture
++            chunk = await state["proc"].stdout.read(self.CHUNK)
++            if state is not self._capture:
++                continue  # a read from the replaced child cannot join the new stream
++            if not chunk:
++                if state["carry"]:
++                    state["carry"] = b""
++                    print("driver: ⚠ capture ended with one incomplete PCM byte; dropped", flush=True)
++                return b""
++            chunk = state["carry"] + chunk
++            end = len(chunk) // 2 * 2
++            state["carry"] = chunk[end:]
++            if end:
++                return chunk[:end]
++            # One byte is not a complete s16le sample. Await its partner rather
++            # than returning a false EOF or shifting the next frame's samples.
++
++    async def _drain_capture_stderr(self, state) -> None:
++        try:
++            while chunk := await state["proc"].stderr.read(4096):
++                state["stderr"].extend(chunk)
++                del state["stderr"][:-4096]
++        except OSError as error:
++            state["stderr_error"] = type(error).__name__
++
++    async def _report_capture_exit(self, state, drain) -> None:
++        code = await state["proc"].wait()
++        await drain
++        if state["stopped"]:
++            return
++        # One bounded, escaped line per unexpected exit. Never mix stderr into
++        # PCM, stream arbitrary diagnostics into the log, or block capture on it.
++        tail = bytes(state["stderr"][-1024:]).decode("utf-8", errors="replace")
++        detail = repr(tail)[-2048:]
++        print(f"driver: ⚠ capture exited (code={code}, stderr_tail={detail}, "
++              f"stderr_read_error={state.get('stderr_error', 'none')})", flush=True)
+ 
+     def kill(self) -> None:
++        if self._capture is not None:
++            self._capture["stopped"] = True
+         if self.proc is not None and self.proc.returncode is None:
+-            self.proc.kill()
++            try:
++                self.proc.kill()
++            except ProcessLookupError:
++                pass

@@ -1,4 +1,4 @@
-"""Prepare one public, hash-verified source file for isolated metadata tests."""
+"""Prepare public, hash-verified source files for isolated metadata tests."""
 import hashlib
 from pathlib import Path
 import urllib.request
@@ -14,9 +14,9 @@ if hashlib.sha256(data).hexdigest() != SHA256:
     raise SystemExit('REFUSED: release archive SHA256 mismatch')
 ARCHIVE.write_bytes(data)
 with zipfile.ZipFile(ARCHIVE) as archive:
-    for filename in ('rt_driver.py', 'tap_log.py'):
+    for filename in ('rt_driver.py', 'tap_log.py', 'audio_io.py'):
         source = archive.read('mini-mouth/src/' + filename)
         target = Path('fixture/mini-mouth/src') / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source)
-print('Verified public r5 archive; extracted two source files for non-live tests.')
+print('Verified public r5 archive; extracted three source files for non-live tests.')

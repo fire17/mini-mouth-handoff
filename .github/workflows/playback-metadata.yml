@@ -28,3 +28,7 @@ jobs:
         run: git apply --directory=fixture patches/tap-portability.patch
       - name: Prove sidecar survives unavailable symlink privileges
         run: python test/tap-portability.py --source fixture/mini-mouth/src/tap_log.py
+      - name: Apply reviewed PCM framing and capture diagnostics
+        run: git apply --directory=fixture patches/mic-pcm-diagnostics.patch
+      - name: Prove real subprocess bytes, metering, capture errors and bounded stderr
+        run: python test/mic-subprocess.py --archive fixture-r5.zip --candidate fixture/mini-mouth/src/audio_io.py
