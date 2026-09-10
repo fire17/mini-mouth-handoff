@@ -27,7 +27,7 @@ class LifecycleExit(unittest.TestCase):
     def run_lifecycle(self, statement, *, windows=False, previous=0):
         with tempfile.TemporaryDirectory(prefix='resume lifecycle שלום ') as box:
             env = dict(os.environ, PYTHONPATH=str(ROOT / 'src'), PYTHONUTF8='1', PYTHONIOENCODING='utf-8',
-                       MM_WINDOWS_SUPERVISOR_SESSION='a' * 32,
+                       MM_WINDOWS_SUPERVISOR_SESSION='a' * 32, MM_WINDOWS_SUPERVISOR_PID='1234',
                        MM_WINDOWS_SUPERVISOR_RESTART_PATH=str(Path(box) / 'restart.json'),
                        MM_RESUME_CRASHES=','.join(str(time.time()) for _ in range(previous)))
             prefix = '''

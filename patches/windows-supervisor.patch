@@ -8,7 +8,7 @@
  import os
  from pathlib import Path
  import shutil
-@@ -12,6 +13,10 @@
+@@ -12,6 +13,24 @@
  import time
  
  
@@ -16,10 +16,24 @@
 +    pass
 +
 +
++def dryrun_driver_arguments(supervised):
++    if not supervised:
++        return [sys.executable, "-c", "import time; time.sleep(3600)"]
++    # The private dryrun follows the actual cooperative-control path with no
++    # graph, credential, microphone, or speaker imports.
++    script = (f"import asyncio, sys\nsys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
++              "from windows_supervisor import run_driver\n"
++              "class Driver:\n"
++              " def __init__(self): self.commands = asyncio.Queue()\n"
++              " async def run(self): await self.commands.get()\n"
++              "asyncio.run(run_driver(Driver()))\n")
++    return [sys.executable, "-u", "-c", script]
++
++
  def redis_ready(host="127.0.0.1", port=6379):
      try:
          with socket.create_connection((host, port), timeout=1) as conn:
-@@ -32,8 +37,13 @@
+@@ -32,8 +51,13 @@
          return
      if sys.platform == "win32":
          # Each child is still our direct live child; never reap by executable name.
@@ -35,7 +49,7 @@
      else:  # only reachable in a disposable --dryrun on the verification host
          proc.terminate()
      try:
-@@ -43,17 +53,27 @@
+@@ -43,17 +67,27 @@
          proc.wait(timeout=5)
  
  
@@ -65,7 +79,7 @@
      root = Path(__file__).resolve().parents[1]
      # Dryruns never touch the user's runtime directory or Redis, even without overrides.
      scratch = tempfile.TemporaryDirectory(prefix="mm-launch-") if args.dryrun and not args.runtime_dir else None
-@@ -61,18 +81,48 @@
+@@ -61,18 +95,49 @@
      runtime.mkdir(parents=True, exist_ok=True)
      log_path = runtime / "mini-mouth-live.log"
      children = []
@@ -74,6 +88,7 @@
 +    if owner is not None:
 +        from windows_supervisor import RESTART
 +        env["MM_WINDOWS_SUPERVISOR_SESSION"] = owner.state["session"]
++        env["MM_WINDOWS_SUPERVISOR_PID"] = str(owner.state["supervisorPid"])
 +        env["MM_WINDOWS_SUPERVISOR_RESTART_PATH"] = str(owner.runtime / RESTART)
      flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
      result = 0
@@ -116,7 +131,7 @@
              if not args.dryrun:
                  import mm_platform
                  for binary in ("ffmpeg", "ffplay"):
-@@ -86,51 +136,100 @@
+@@ -86,51 +151,111 @@
                  server = next((p for p in candidates if p and Path(p).is_file()), None)
                  if not server:
                      raise RuntimeError("Redis is unavailable at 127.0.0.1:6379. Rerun Install.ps1 with -InstallSystemDependencies -RedisMode Memurai, or start your local Redis server.")
@@ -134,7 +149,7 @@
              if args.dryrun:
 -                driver = start([sys.executable, "-c", "import time; time.sleep(3600)"])
 -                watcher = start([sys.executable, "-c", "import time; time.sleep(3600)"])
-+                driver = start([sys.executable, "-c", "import time; time.sleep(3600)"], role="driver")
++                driver = start(dryrun_driver_arguments(owner is not None), role="driver")
 +                watcher = start([sys.executable, "-c", "import time; time.sleep(3600)"], role="watcher")
              else:
 -                driver = start([sys.executable, "-u", str(root / "live.py")])
@@ -177,7 +192,7 @@
 +                        record("driver_restart", pid=driver.pid, exit_code=driver.returncode,
 +                               crashes_in_window=len(crashes))
 +                        env["MM_RESUME_CRASHES"] = ",".join(f"{t:.0f}" for t in crashes)
-+                        arguments = ([sys.executable, "-c", "import time; time.sleep(3600)"]
++                        arguments = (dryrun_driver_arguments(owner is not None)
 +                                     if args.dryrun else [sys.executable, "-u", str(root / "live.py")])
 +                        driver = start(arguments, role="driver")
 +                        continue
@@ -208,6 +223,17 @@
 +        record("supervisor_error", error_type=type(exc).__name__, detail=str(exc))
      finally:
 -        for proc in reversed(children):
++        if owner is not None and owner.stop_requested():
++            from windows_supervisor import STOP_GRACE_SECONDS
++            for role, proc in children:
++                if role != "driver" or proc.poll() is not None:
++                    continue
++                record("cooperative_stop_wait", pid=proc.pid, timeout_seconds=STOP_GRACE_SECONDS)
++                try:
++                    proc.wait(timeout=STOP_GRACE_SECONDS)
++                    record("cooperative_stop_complete", pid=proc.pid, exit_code=proc.returncode)
++                except subprocess.TimeoutExpired:
++                    record("cooperative_stop_timeout", pid=proc.pid)
 +        for role, proc in reversed(children):
              try:
 +                was_running = proc.poll() is None
@@ -235,11 +261,12 @@
      return result
 --- /dev/null
 +++ b/mini-mouth/src/windows_supervisor.py
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,323 @@
 +"""Detached Windows call ownership and local, generation-bound stop control."""
 +from __future__ import annotations
 +
 +import argparse
++import asyncio
 +import contextlib
 +import json
 +import math
@@ -255,6 +282,7 @@
 +LOCK = "mini-mouth-supervisor.lock"
 +RESTART = "mini-mouth-supervisor.restart.json"
 +RESTART_CODE = 75
++STOP_GRACE_SECONDS = 8
 +
 +
 +def read_json(path):
@@ -498,6 +526,34 @@
 +                      "crashes": crashes})
 +
 +
++async def run_driver(driver):
++    """Use the driver's existing stop command; the supervisor bounds its grace period."""
++    session = os.environ.get("MM_WINDOWS_SUPERVISOR_SESSION", "")
++    supervisor_pid = int(os.environ.get("MM_WINDOWS_SUPERVISOR_PID", "0"))
++    restart_path = os.environ.get("MM_WINDOWS_SUPERVISOR_RESTART_PATH", "")
++    if not session or not supervisor_pid or not restart_path:
++        raise RuntimeError("supervised driver control metadata is incomplete")
++    stop_path = Path(restart_path).with_name(STOP)
++    task = asyncio.create_task(driver.run())
++
++    async def watch_stop():
++        while not task.done():
++            row = read_json(stop_path)
++            if (row and row.get("v") == 1 and row.get("session") == session
++                    and row.get("supervisorPid") == supervisor_pid):
++                print("driver: local supervisor stop requested", flush=True)
++                await driver.commands.put(("stop", None))
++                return
++            await asyncio.sleep(.1)
++
++    watcher = asyncio.create_task(watch_stop())
++    try:
++        await task
++    finally:
++        watcher.cancel()
++        await asyncio.gather(watcher, return_exceptions=True)
++
++
 +def main(argv=None):
 +    parser = argparse.ArgumentParser(description=__doc__)
 +    parser.add_argument("action", choices=("serve", "stop"))
@@ -531,15 +587,25 @@
 +    raise SystemExit(main())
 --- a/mini-mouth/live.py
 +++ b/mini-mouth/live.py
-@@ -491,6 +491,7 @@
+@@ -491,9 +491,16 @@
  # stays valid), the graph carries mute/history, and the crash counter rides in
  # the environment so the never-stay-down backoff survives the exec.
  crashes = [float(t) for t in os.environ.get("MM_RESUME_CRASHES", "").split(",") if t]
 +_exit_status = 0
++_driver = None
  try:
      try:
-         asyncio.run(Driver(mouth).run())
-@@ -531,9 +532,33 @@
+-        asyncio.run(Driver(mouth).run())
++        _driver = Driver(mouth)
++        if os.name == "nt" and os.environ.get("MM_WINDOWS_SUPERVISOR_SESSION"):
++            from windows_supervisor import run_driver
++            asyncio.run(run_driver(_driver))
++        else:
++            asyncio.run(_driver.run())
+     except KeyboardInterrupt:
+         raise
+     except Exception as error:
+@@ -531,9 +538,39 @@
          sub.cancel()
          env = dict(os.environ, MM_RESUME_CRASHES=",".join(f"{t:.0f}" for t in crashes))
          sys.stdout.flush(); sys.stderr.flush()
@@ -573,6 +639,12 @@
 +    except Exception as cleanup_error:
 +        _exit_status = _exit_status or 1
 +        print(f"[driver shutdown cleanup failed: {type(cleanup_error).__name__}]", file=sys.stderr, flush=True)
++    try:
++        if _driver is not None and getattr(_driver, "tap", None) is not None:
++            _driver.tap.close()
++    except Exception as tap_error:
++        _exit_status = _exit_status or 1
++        print(f"[driver sidecar close failed: {type(tap_error).__name__}]", file=sys.stderr, flush=True)
 +    sys.stdout.flush()
 +    sys.stderr.flush()
 +    os._exit(_exit_status)

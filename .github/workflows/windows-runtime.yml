@@ -27,3 +27,9 @@ jobs:
         run: python test/supervisor-lifecycle.py --source fixture/mini-mouth/src/windows_launcher.py
       - name: Prove supervised recovery and preserved failure outcomes
         run: python test/supervisor-resume.py --source fixture/mini-mouth
+      - name: Prove cooperative stop and bounded fallback
+        run: python test/supervisor-cooperative.py --source fixture/mini-mouth
+      - name: Apply opt-in microphone diagnostic after supervisor module registration
+        run: git apply --directory=fixture patches/mic-signal.patch
+      - name: Prove bounded sample statistics, gate closure and capture occupancy
+        run: python test/mic-signal.py --source fixture/mini-mouth/src/mic_signal.py --selftest fixture/mini-mouth/src/selftest.py

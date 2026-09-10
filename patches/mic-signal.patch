@@ -1,0 +1,342 @@
+--- /dev/null
++++ b/mini-mouth/src/mic_signal.py
+@@ -0,0 +1,247 @@
++"""Explicit, bounded microphone signal diagnostic. No files, playback or network."""
++from __future__ import annotations
++
++import array
++import asyncio
++import json
++import os
++import re
++import shlex
++import sys
++
++RATE = 24000
++SECONDS = 2
++MAX_BYTES = RATE * SECONDS * 2
++GUIDANCE = ("Compare Windows Settings > System > Sound > Input > Test your microphone; "
++            "check the microphone mute key and microphone privacy settings. If needed, "
++            "compare input with audio enhancements disabled. Quiet surroundings, noise "
++            "suppression, mute/privacy state and device/driver state can all affect this "
++            "result; it does not identify a hardware fault.")
++
++
++def sample_stats(pcm: bytes) -> dict:
++    samples = array.array('h')
++    samples.frombytes(pcm[:len(pcm) // 2 * 2])
++    if sys.byteorder == 'big':
++        samples.byteswap()
++    count = len(samples)
++    nonzero = sum(value != 0 for value in samples)
++    above = sum(abs(value) > 1 for value in samples)
++    return {'sample_count': count, 'sample_seconds': count / RATE,
++            'nonzero_count': nonzero, 'nonzero_proportion': nonzero / count if count else None,
++            'abs_gt1_count': above, 'abs_gt1_proportion': above / count if count else None,
++            'max_abs': max(map(abs, samples), default=None), 'partial_bytes': len(pcm) % 2}
++
++
++def _driver_command(command: str) -> bool:
++    try:
++        args = [arg.strip('"\'') for arg in shlex.split(command, posix=False)]
++    except ValueError:
++        return False
++    if not args:
++        return False
++    base = args[0].replace('\\', '/').rsplit('/', 1)[-1]
++    if not re.fullmatch(r'python(?:w)?(?:\d+(?:\.\d+)*)?(?:\.exe)?', base, re.I):
++        return False
++    scripts = {'live.py', 'rt_driver.py', 'windows_launcher.py', 'windows_supervisor.py'}
++    return any(arg.replace('\\', '/').rsplit('/', 1)[-1] in scripts for arg in args[1:]) or \
++        any(args[index:index+2] == ['-m', 'rt_driver'] for index in range(1, len(args)-1))
++
++
++def _diagnostic_capture_command(command: str) -> bool:
++    """Recognize only this probe's FFmpeg command; never used for process cleanup."""
++    try:
++        args = [arg.strip('"\'') for arg in shlex.split(command, posix=False)]
++    except ValueError:
++        return False
++    if len(args) < 12 or args[0].replace('\\', '/').rsplit('/', 1)[-1].casefold() not in ('ffmpeg', 'ffmpeg.exe'):
++        return False
++    return (args[1:6] == ['-nostdin', '-hide_banner', '-loglevel', 'error', '-f'] and
++            args[6] in ('dshow', 'avfoundation') and args[-5:] == ['-f', 's16le', '-t', '2', '-'])
++
++
++def capture_occupancy() -> dict:
++    import mm_platform
++    try:
++        rows = mm_platform.process_rows(timeout=5)
++    except Exception as error:
++        return {'state': 'unknown', 'detail': 'process enumeration failed: ' + type(error).__name__}
++    if not any(pid == os.getpid() and command for pid, _, command in rows):
++        return {'state': 'unknown', 'detail': 'process enumeration could not establish this diagnostic process'}
++    known = [pid for pid, _, command in rows if pid != os.getpid() and command and
++             (mm_platform.is_capture_command(command) or _driver_command(command) or
++              _diagnostic_capture_command(command))]
++    if known:
++        return {'state': 'busy', 'pids': known,
++                'detail': 'a known mouth/capture is running; close or stop it normally, then rerun'}
++    return {'state': 'no_known_owner',
++            'detail': 'no known mouth/capture found; other applications may still hold the endpoint'}
++
++
++def capture_argv() -> list[str]:
++    import mm_platform
++    argv = list(mm_platform.mic_argv())
++    if argv[-3:] != ['-f', 's16le', '-']:
++        raise ValueError('unexpected capture format; diagnostic declined')
++    return [argv[0], '-nostdin', *argv[1:-1], '-t', str(SECONDS), argv[-1]]
++
++
++def _gate_open(gate) -> bool:
++    return isinstance(gate, dict) and bool(gate.get('alive') and gate.get('caps') and not gate.get('mute', True))
++
++
++class _GateClosed(Exception):
++    pass
++
++
++async def collect(argv, *, timeout_s=8.0, cleanup_s=2.0, caps_read_async=None) -> dict:
++    """Drain both pipes, retain at most two seconds PCM and 4 KiB stderr, own one child."""
++    proc = None
++    tasks = []
++    pcm = bytearray()
++    tail = bytearray()
++    total_bytes = 0
++    outcome = 'complete'
++    cleanup_ok = True
++    detail = ''
++
++    async def gate_check():
++        try:
++            gate = await caps_read_async()
++        except Exception as error:
++            raise _GateClosed('Caps sensor failed during capture: ' + type(error).__name__) from error
++        if not _gate_open(gate):
++            raise _GateClosed('Caps Lock closed or its sensor became unavailable; diagnostic capture stopped')
++
++    async def gate_watch():
++        while True:
++            await asyncio.sleep(.05)
++            await gate_check()
++
++    async def output():
++        nonlocal total_bytes
++        while chunk := await proc.stdout.read(4096):
++            total_bytes += len(chunk)
++            pcm.extend(chunk[:max(0, MAX_BYTES - len(pcm))])
++
++    async def errors():
++        while chunk := await proc.stderr.read(4096):
++            tail.extend(chunk)
++            del tail[:-4096]
++
++    async def discard(stream):
++        while await stream.read(4096):
++            pass
++
++    try:
++        async with asyncio.timeout(timeout_s):
++            if caps_read_async:
++                await gate_check()
++            proc = await asyncio.create_subprocess_exec(
++                *argv, stdin=asyncio.subprocess.DEVNULL,
++                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
++            tasks = [asyncio.create_task(output()), asyncio.create_task(errors()),
++                     asyncio.create_task(proc.wait())]
++            completed = asyncio.gather(*tasks)
++            tasks.append(completed)
++            if caps_read_async:
++                watcher = asyncio.create_task(gate_watch())
++                tasks.append(watcher)
++                finished, _ = await asyncio.wait([completed, watcher], return_when=asyncio.FIRST_COMPLETED)
++                if watcher in finished:
++                    await watcher
++            await completed
++    except _GateClosed as error:
++        outcome, detail = 'caps_closed', str(error)
++    except TimeoutError:
++        outcome, detail = 'timeout', 'capture did not complete within its time budget'
++    except OSError as error:
++        outcome, detail = 'open_or_capture_error', type(error).__name__
++    finally:
++        if proc is not None:
++            if proc.returncode is None:
++                try:
++                    proc.kill()
++                except ProcessLookupError:
++                    pass
++            for task in tasks:
++                if not task.done():
++                    task.cancel()
++            await asyncio.gather(*tasks, return_exceptions=True)
++            try:
++                await asyncio.wait_for(asyncio.gather(
++                    discard(proc.stdout), errors(), proc.wait()), timeout=cleanup_s)
++            except (TimeoutError, OSError):
++                cleanup_ok = False
++    code = proc.returncode if proc is not None else None
++    if outcome == 'complete' and code != 0:
++        outcome, detail = 'open_or_capture_error', 'capture process exited nonzero'
++    elif outcome == 'complete' and total_bytes != MAX_BYTES:
++        outcome = 'incomplete' if total_bytes < MAX_BYTES else 'excess_data'
++        detail = 'capture did not provide exactly two seconds of the expected PCM format'
++    if not cleanup_ok:
++        outcome, detail = 'cleanup_incomplete', 'owned capture cleanup did not complete within its time budget'
++    return {'outcome': outcome, 'detail': detail, 'exit_code': code,
++            'bytes_received': total_bytes, 'cleanup_ok': cleanup_ok,
++            'stderr_tail': bytes(tail[-1024:]).decode('utf-8', errors='replace'),
++            'metrics': sample_stats(bytes(pcm))}
++
++
++def observe(*, caps_read, caps_read_async=None, occupancy=capture_occupancy, argv=capture_argv, capture=None) -> dict:
++    result = {'status': 'skip', 'audio_saved': False, 'audio_transmitted': False}
++
++    def gate_failure():
++        try:
++            gate = caps_read()
++        except Exception as error:
++            return dict(result, reason='caps_unknown', detail=type(error).__name__)
++        if not _gate_open(gate):
++            return dict(result, reason='caps_closed', detail='Caps Lock must be observed ON with a live sensor; no capture opened')
++        return None
++
++    denied = gate_failure()
++    if denied:
++        return denied
++    ownership = occupancy()
++    if ownership.get('state') != 'no_known_owner':
++        return dict(result, reason='capture_' + ownership.get('state', 'unknown'), ownership=ownership)
++    try:
++        command = argv()
++    except Exception as error:
++        return dict(result, status='fail', reason='capture_setup_error', detail=type(error).__name__)
++    # Device enumeration may take time. Recheck ownership immediately before open.
++    ownership = occupancy()
++    if ownership.get('state') != 'no_known_owner':
++        return dict(result, reason='capture_' + ownership.get('state', 'unknown'), ownership=ownership)
++    denied = gate_failure()
++    if denied:
++        return denied
++    if capture is None and caps_read_async is None:
++        return dict(result, reason='caps_unknown', detail='no live gate monitor available; no capture opened')
++    measured = capture(command) if capture else asyncio.run(collect(command, caps_read_async=caps_read_async))
++    result.update(measured)
++    if measured['outcome'] != 'complete':
++        return dict(result, status='skip' if measured['outcome'] == 'caps_closed' else 'fail',
++                    reason=measured['outcome'])
++    metrics = measured['metrics']
++    if metrics['max_abs'] <= 1:
++        return dict(result, status='warn', reason='near_zero_input', guidance=GUIDANCE)
++    return dict(result, status='ok', reason='nontrivial_samples_observed',
++                detail='samples exceed one PCM unit; this does not prove speech recognition or audible input quality')
++
++
++def main(*, caps_read, caps_read_async, as_json=False) -> int:
++    print('Microphone signal diagnostic: two seconds in memory; no audio file, playback or transmission. '
++          'Keep Caps Lock ON. A running mouth/capture will be reported before opening the endpoint.',
++          file=sys.stderr, flush=True)
++    try:
++        result = observe(caps_read=caps_read, caps_read_async=caps_read_async)
++    except KeyboardInterrupt:
++        result = {'status': 'skip', 'reason': 'cancelled', 'audio_saved': False, 'audio_transmitted': False}
++        print(json.dumps(result), flush=True)
++        return 130
++    if as_json:
++        print(json.dumps(result, ensure_ascii=False), flush=True)
++    else:
++        print('MIC SIGNAL ' + result['status'].upper() + ': ' + json.dumps(result, ensure_ascii=False), flush=True)
++    return 1 if result['status'] == 'fail' else 2 if result['status'] == 'skip' else 0
+--- a/mini-mouth/src/selftest.py
++++ b/mini-mouth/src/selftest.py
+@@ -60,12 +60,13 @@
+ 
+ 
+ class Options:
+-    __slots__ = ("platform", "no_device", "json", "interactive", "redis_host", "redis_port")
++    __slots__ = ("platform", "no_device", "json", "interactive", "redis_host", "redis_port", "mic_signal")
+ 
+     def __init__(self, platform=True, no_device=False, as_json=False, interactive=False,
+                  redis_host="127.0.0.1", redis_port=6379):
+         self.platform, self.no_device, self.json = platform, no_device, as_json
+         self.interactive = interactive
++        self.mic_signal = False
+         self.redis_host, self.redis_port = redis_host, redis_port
+ 
+ 
+@@ -111,9 +112,15 @@
+     """
+     import asyncio
+ 
++    return asyncio.run(_default_caps_read_async())
++
++
++async def _default_caps_read_async() -> dict:
++    """The same CapsGate reading, usable while an opt-in capture is running."""
++
+     import caps_gate
+     gate = caps_gate.CapsGate()
+-    caps = asyncio.run(gate.read())
++    caps = await gate.read()
+     mute, why = gate.should_mute()
+     return {"caps": caps, "alive": gate.alive, "reason": gate.reason,
+             "mute": mute, "verdict": why, "sensor": gate.sensor}
+@@ -515,6 +522,7 @@
+ 
+ 
+ USAGE = """mm selftest [--platform] [--no-device] [--interactive] [--json] [--redis host:port]
++mm selftest --mic-signal [--json]
+ 
+ Proves this box can run the mouth: python, ffmpeg/ffplay, mic devices, a 1s capture, a
+ 300ms tone, Redis PING, the caps gate, the ESC watcher, credentials, websockets.
+@@ -522,7 +530,10 @@
+ 
+   --no-device     do not open the mic or the speaker (use it while a call is live)
+   --interactive   ask for a real Caps Lock flip and require the reader to see it
+-  --json          machine output; the exit code is the number of FAILING rows"""
++  --mic-signal    only sample two seconds of mic statistics, with Caps Lock ON and no known active capture;
++                  stop if Caps closes or its sensor fails; no audio saved/transmitted, tone or network;
++                  exit 0 = observation/WARN, 1 = capture failure, 2 = skipped, 130 = cancelled
++  --json          machine output; for the regular selftest, exit code is the number of FAILING rows"""
+ 
+ 
+ def parse_args(argv):
+@@ -537,6 +548,8 @@
+             o.no_device = True
+         elif arg == "--interactive":
+             o.interactive = True
++        elif arg == "--mic-signal":
++            o.mic_signal = True
+         elif arg == "--json":
+             o.json = True
+         elif arg == "--redis":
+@@ -550,6 +563,8 @@
+             return None, "help"
+         else:
+             return None, f"unknown flag {arg!r}"
++    if o.mic_signal and (o.no_device or o.interactive):
++        return None, "--mic-signal cannot be combined with --no-device or --interactive"
+     return o, ""
+ 
+ 
+@@ -563,6 +578,11 @@
+         print(f"mm selftest: {error}", file=sys.stderr)
+         print(USAGE, file=sys.stderr)
+         return 2
++    if o.mic_signal:
++        import mic_signal
++        return mic_signal.main(caps_read=probe.caps_read if probe else _default_caps_read,
++                               caps_read_async=getattr(probe, 'caps_read_async', None) if probe else _default_caps_read_async,
++                               as_json=o.json)
+     rows = run(o, probe)
+     if o.json:
+         print(json.dumps({"rows": [r.as_dict() for r in rows], "summary": summary(rows)},
+--- a/mini-mouth/pyproject.toml
++++ b/mini-mouth/pyproject.toml
+@@ -14,4 +14,4 @@
+ 
+ [tool.setuptools]
+ package-dir = {"" = "src"}
+-py-modules = ["accounts_tool", "app_resolver", "atlas_tool", "audio_io", "caps_gate", "clipboard_tool", "context_tool", "credential_check", "dictate_tool", "emoji_queue", "errors", "garble_gate", "install_check", "keeper", "live_wall", "mic_doctor", "mic_health", "mm_esc_win", "mm_platform", "open_chain", "open_index", "organ_voice", "praise_gate", "queue_law", "quick_agent", "quick_tool", "relay_tool", "rt_driver", "say_reason", "segment_gate", "selftest", "speech_queue", "swap_bridge", "sync_report", "tap_log", "tick_queue", "turn_archive", "turn_latch", "ui_api", "watch_tool", "whisper_worker", "windows_launcher", "windows_supervisor", "xomouth"]
++py-modules = ["accounts_tool", "app_resolver", "atlas_tool", "audio_io", "caps_gate", "clipboard_tool", "context_tool", "credential_check", "dictate_tool", "emoji_queue", "errors", "garble_gate", "install_check", "keeper", "live_wall", "mic_doctor", "mic_health", "mic_signal", "mm_esc_win", "mm_platform", "open_chain", "open_index", "organ_voice", "praise_gate", "queue_law", "quick_agent", "quick_tool", "relay_tool", "rt_driver", "say_reason", "segment_gate", "selftest", "speech_queue", "swap_bridge", "sync_report", "tap_log", "tick_queue", "turn_archive", "turn_latch", "ui_api", "watch_tool", "whisper_worker", "windows_launcher", "windows_supervisor", "xomouth"]
