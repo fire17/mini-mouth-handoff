@@ -71,6 +71,11 @@ XO/tests/test_websocket.py
 XO/tests/test_wire.py
 XO/uv.lock
 XO/vision_overhaul.md
+livemind-lite/MIND.md
+livemind-lite/ears.json
+livemind-lite/lm-ear
+livemind-lite/lm-ear.ps1
+livemind-lite/mm-ear.py
 mini-mouth/.gitignore
 mini-mouth/ARCHITECTURE.md
 mini-mouth/LICENSE

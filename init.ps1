@@ -10,9 +10,9 @@ $ErrorActionPreference = 'Stop'
 if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'This bootstrap requires Windows 10/11 and PowerShell 5.1 or newer.' }
 
 # Release constants are deliberately pinned; the archive is verified before extraction.
-$BundleUrl = 'https://github.com/fire17/mini-mouth-handoff/releases/download/v0.1.2/mini-mouth-windows-candidate-2026-09-11-r4.zip'
-$BundleSha256 = 'ae4a9104b8073f032e5ef711854b08989c4d39331214871545ac15a612a07185'
-$BundleDirectory = 'windows-2026-09-11-r4'
+$BundleUrl = 'https://github.com/fire17/mini-mouth-handoff/releases/download/v0.1.3/mini-mouth-windows-candidate-2026-09-11-r5.zip'
+$BundleSha256 = '43335262bbfe5ebacd6f722112ed6e584ad3bab282315621b731303d0f825281'
+$BundleDirectory = 'windows-2026-09-11-r5'
 if (-not $Destination) {
     $localData = [Environment]::GetFolderPath('LocalApplicationData')
     if (-not $localData) { throw 'LOCALAPPDATA is unavailable; supply -Destination with a writable installation directory.' }

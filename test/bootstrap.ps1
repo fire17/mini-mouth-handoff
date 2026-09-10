@@ -50,7 +50,7 @@ Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value 'called'
     $validScript = [scriptblock]::Create($validSource)
     $goodBase = Join-Path $testRoot 'install with spaces'
     & $validScript -Destination $goodBase
-    $installed = Join-Path $goodBase 'windows-2026-09-11-r4'
+    $installed = Join-Path $goodBase 'windows-2026-09-11-r5'
     $receipt = Get-Content -LiteralPath (Join-Path $installed 'called.json') -Raw | ConvertFrom-Json
     if ($receipt.RedisMode -ne 'Existing' -or $receipt.Dependencies -or $receipt.Start) { throw 'Default bootstrap activated unexpected setup/audio options.' }
     Write-Output 'PASS: real HTTP ZIP installed into a path with spaces; setup defaults passed without audio.'
