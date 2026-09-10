@@ -50,18 +50,18 @@ MIND because no ear watched the board.
 import subprocess, re, os, sys, time, json, glob
 
 CONFIG = os.environ.get("LM_EARS") or os.path.expanduser("~/.livemind/ears.json")
-SEEN_DIR = os.path.expanduser("~/.livemind/ears/seen")
+SEEN_DIR = os.path.expanduser(os.environ.get("LM_EAR_SEEN_DIR") or "~/.livemind/ears/seen")
 H = os.path.expanduser
 DEFAULTS = {
     "version": 3, "me": "mind",
     "ears": {
         "user-inputs": {"enabled": True, "desc": "user inputs — [Spoken] 🗣 lines of the live log, [Typed ⌨]/[from MagicUI] 🗣⌨ typed turns, [Typed] rows of docs/asks-typed.jsonl",
-                   "log": H("~/.livemind/mini-mouth-live.log"), "typed": H("~/Creations/mini-mouth/docs/asks-typed.jsonl"), "om": H("~/.livemind/om-user.jsonl"), "cut": 700},
+                   "log": H("~/.livemind/mini-mouth-live.log"), "typed": None, "om": None, "cut": 700},
         "system": {"enabled": True, "desc": "system events — driver run headers + pidfile changes + ⚠ error lines",
                    "log": H("~/.livemind/mini-mouth-live.log"), "pidfile": H("~/.livemind/mini-mouth.pid"), "cut": 700},
-        "board":  {"enabled": True, "desc": "the asks board — events targeting me (assign/handed/tier/status; delivered receipt written by code) + his thread comments on my asks",
+        "board":  {"enabled": False, "desc": "the asks board — disabled in LiveMind-lite; belongs to the full LiveMind body",
                    "docs": H("~/Creations/mini-mouth/docs"), "cut": 700},
-        "bus":    {"enabled": True, "desc": "the organ bus — body + limbs + my own channel, one line per message (head + lm-read <id>); writes my presence heartbeat",
+        "bus":    {"enabled": False, "desc": "the organ bus — disabled in LiveMind-lite; belongs to the full LiveMind body",
                    "bus": H("~/.livemind/bus"), "channels": ["body", "limbs"], "cut": 400},   # own channel = the profile's `me` unless the profile overrides
     },
     # A profile = {me, tag, ears-overrides}. The mind is the untagged default; every other organ gets a tag on
@@ -128,20 +128,32 @@ def _tail_lines(path, nbytes=400_000):
 
 POS = {}   # path -> byte offset this process has CONSUMED (stamped into every receipt so `coverage` compares position, not text)
 
-def _follow(path, poll=0.2):
-    """Yield lines appended to path from now on; survives rotation/truncation/absence."""
-    f = ino = None
+def _follow(path, poll=0.2, start=None):
+    """Yield complete appended UTF-8 lines; retain partial writes until newline."""
+    f = ino = None; pending = b""; next_start = start
     while True:
         try:
             if f is None:
-                f = open(path, "rb"); f.seek(0, 2); ino = os.fstat(f.fileno()).st_ino; POS[path] = f.tell()
+                f = open(path, "rb")
+                f.seek(0, 2)
+                if next_start is not None: f.seek(min(next_start, f.tell()))
+                next_start = 0
+                ino = os.fstat(f.fileno()).st_ino; POS[path] = f.tell()
             line = f.readline()
-            if line: POS[path] = f.tell(); yield line.decode("utf-8", "replace").rstrip("\r\n"); continue
+            if line:
+                pending += line
+                if pending.endswith(b"\n"):
+                    POS[path] = f.tell()
+                    yield pending.decode("utf-8", "replace").rstrip("\r\n")
+                    pending = b""
+                continue
             time.sleep(poll)
             st = os.stat(path)
-            if st.st_ino != ino or st.st_size < f.tell(): f.close(); f = None; out("EAR: file rotated — reopened")
+            if st.st_ino != ino or st.st_size < f.tell():
+                f.close(); f = None; pending = b""; out("EAR: file rotated — reopened")
         except FileNotFoundError:
-            f = None; time.sleep(1.0)
+            if f is not None: f.close()
+            f = None; pending = b""; next_start = 0; time.sleep(1.0)
 
 HIM = ("him", "user")   # his A210: the writer says `user` from 13:3x on; old ledger rows keep `him` forever (EVA: never rewrite history) — match both
 
@@ -253,7 +265,7 @@ def _om_cls(cfg):
 def _driver_cls(cfg):
     # match ANYWHERE in the line: run headers land 13-30 lines after boot and get spliced mid-karaoke-line
     # (A16 audit 13:40: 1 of 47 headers today was invisible to a startswith match)
-    return lambda l: ("[Driver] " + l[l.find("=== "):][:300]) if ("=== run" in l or "=== driver" in l) else None
+    return lambda l: ("[Driver] " + l[l.find("=== "):][:300]) if any(header in l for header in ("=== run", "=== driver", "=== Windows launcher")) else None
 
 def _errors_cls(cfg):
     return lambda l: ("[Error] " + l[: cfg["cut"]]) if "⚠ error" in l else None
@@ -306,13 +318,17 @@ def _threads_cls(cfg, me):
     return cls
 
 def ear_user_inputs(cfg, me):
-    return [(cfg["log"], _voice_cls(cfg), lambda: [l for l in _tail_lines(cfg["log"]) if l.startswith("🗣")][-3:]),
-            (cfg["typed"], _typed_cls(cfg), lambda: [l for l in _tail_lines(cfg["typed"]) if l.strip()][-2:]),
-            (cfg["om"], _om_cls(cfg), lambda: [l for l in _tail_lines(cfg["om"]) if l.strip()][-2:])]
+    sources = [(cfg["log"], _voice_cls(cfg), lambda: [l for l in _tail_lines(cfg["log"]) if l.startswith("🗣")][-3:])]
+    if cfg.get("typed"):
+        sources.append((cfg["typed"], _typed_cls(cfg), lambda: [l for l in _tail_lines(cfg["typed"]) if l.strip()][-2:]))
+    if cfg.get("om"):
+        sources.append((cfg["om"], _om_cls(cfg), lambda: [l for l in _tail_lines(cfg["om"]) if l.strip()][-2:]))
+    return sources
 
 def ear_system(cfg, me):
     # errors are rare: scan 20 MB back so the filter is proven on REAL past errors, never a vacuous 0
-    return [(cfg["log"], _driver_cls(cfg), lambda: [l for l in _tail_lines(cfg["log"]) if "=== run" in l or "=== driver" in l][-2:]),
+    driver = _driver_cls(cfg)
+    return [(cfg["log"], driver, lambda: [l for l in _tail_lines(cfg["log"]) if driver(l)][-2:]),
             (cfg["log"], _errors_cls(cfg), lambda: [l for l in _tail_lines(cfg["log"], 20_000_000) if "⚠ error" in l][-2:])]
 
 def ear_board(cfg, me):
@@ -417,13 +433,15 @@ def run_ear(name, cfg, me, tag=""):
                 os.replace(seen_path + ".tmp", seen_path)
             except OSError as ex: out(f"{tag}seen-stamp FAILED: {ex!r}")
     gap = replay_gap(sources, seen_path, emit)   # THE ARM GAP (EVA 15:1x): lines that landed between the last receipt and this arm are delivered now, never lost
-    for p_, _, _ in sources:   # the ARMED receipt says "seen up to HERE" for every source — a line older than the arm was replayed by the selftest or the gap replay, never missed
+    starts = {}
+    for p_, _, _ in sources:   # retain this offset across ARMED and follower thread startup
         try: POS[p_] = os.path.getsize(p_)
         except OSError: POS[p_] = 0
+        starts[p_] = POS[p_]
     emit(f"EAR ARMED {name} {time.strftime('%H:%M:%S')} sources={[p for p, _, _ in sources]} selftest_fired={fired} gap_replayed={gap}")
     def follow_source(path, cls):
         try:
-            for line in _follow(path):
+            for line in _follow(path, start=starts[path]):
                 c = cls(line)
                 if not c: continue
                 emit(c)

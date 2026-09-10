@@ -11,6 +11,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Ear wrappers under PowerShell 7
+        shell: pwsh
+        run: python -u test/ear-wrapper.py --shell pwsh
+      - name: Ear wrappers under Windows PowerShell 5.1
+        shell: powershell
+        run: python -u test/ear-wrapper.py --shell powershell.exe
       - name: PowerShell 7 bootstrap over real HTTP
         shell: pwsh
         run: ./test/bootstrap.ps1

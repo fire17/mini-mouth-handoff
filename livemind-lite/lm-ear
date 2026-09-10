@@ -5,4 +5,7 @@
 D="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
 export LM_EARS="${LM_EARS:-$D/ears.json}"
-exec python3 -u "$D/mm-ear.py" "$@"
+if [ "$#" -eq 0 ]; then set -- all; fi
+ear_python=python3
+if [ -x "$D/../mini-mouth/.venv/bin/python" ]; then ear_python="$D/../mini-mouth/.venv/bin/python"; fi
+exec "$ear_python" -u "$D/mm-ear.py" "$@"
