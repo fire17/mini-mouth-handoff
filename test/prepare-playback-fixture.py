@@ -14,8 +14,9 @@ if hashlib.sha256(data).hexdigest() != SHA256:
     raise SystemExit('REFUSED: release archive SHA256 mismatch')
 ARCHIVE.write_bytes(data)
 with zipfile.ZipFile(ARCHIVE) as archive:
-    source = archive.read('mini-mouth/src/rt_driver.py')
-target = Path('fixture/mini-mouth/src/rt_driver.py')
-target.parent.mkdir(parents=True, exist_ok=True)
-target.write_bytes(source)
-print('Verified public r5 archive; extracted only rt_driver.py for non-live tests.')
+    for filename in ('rt_driver.py', 'tap_log.py'):
+        source = archive.read('mini-mouth/src/' + filename)
+        target = Path('fixture/mini-mouth/src') / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source)
+print('Verified public r5 archive; extracted two source files for non-live tests.')

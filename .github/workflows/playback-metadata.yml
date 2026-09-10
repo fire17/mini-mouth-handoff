@@ -24,3 +24,7 @@ jobs:
       - run: git apply --directory=fixture patches/playback-off-retry.patch
       - name: Prove bounded retry and stale-player protection
         run: python test/playback-retry.py --source fixture/mini-mouth/src/rt_driver.py
+      - name: Apply reviewed tap discovery fix
+        run: git apply --directory=fixture patches/tap-portability.patch
+      - name: Prove sidecar survives unavailable symlink privileges
+        run: python test/tap-portability.py --source fixture/mini-mouth/src/tap_log.py

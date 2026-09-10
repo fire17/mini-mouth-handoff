@@ -1,0 +1,93 @@
+--- a/mini-mouth/src/tap_log.py
++++ b/mini-mouth/src/tap_log.py
+@@ -33,6 +33,7 @@
+ 
+ import json
+ import os
++import tempfile
+ import time
+ 
+ import live_wall
+@@ -40,7 +41,8 @@
+ # A marked run's tap belongs beside its own driver, not among his (A200; the 15:37 probe found
+ # a test driver's tap file sitting in his live tap directory, where the thread-guard leg reads).
+ ROOT = live_wall.surface("~/.livemind/mini-mouth/tap")
+-LINK_DIR = "/tmp"
++# Preserve the macOS tap contract; Windows discovers under its writable user temp.
++LINK_DIR = tempfile.gettempdir() if os.name == "nt" else "/tmp"
+ 
+ 
+ def now_ms() -> int:
+@@ -63,24 +65,43 @@
+         self.link = os.path.join(link_dir, f"livemind-{self.pid}.jsonl")
+         self.handle = None
+         self.broken = ""
++        self.discovery_error = ""
++        self._discovery_identity = None
+         self.counts: dict[str, int] = {}
+ 
+     def open(self, meta: dict | None = None) -> bool:
+         try:
+             os.makedirs(self.root, exist_ok=True)
+             self.handle = open(self.path, "a", encoding="utf-8")
+-            # the tap picks the NEWEST live-pid file in /tmp; the link is how it finds us
+-            try:
+-                if os.path.islink(self.link) or os.path.exists(self.link):
+-                    os.unlink(self.link)
+-            except OSError:
+-                pass
+-            os.symlink(self.path, self.link)
+         except OSError as error:
+             self.broken = repr(error)
+             print(f"tap_log: CANNOT OPEN {self.path} ({error!r}) — "
+                   f"his preview stays dark and this run has no sidecar", flush=True)
+             return False
++        # Discovery is optional; failure must not discard a usable sidecar or its
++        # run header. Windows symlinks may require a privilege the user lacks, so
++        # a same-volume hard link provides the same live file without elevation.
++        same_path = (os.path.normcase(os.path.abspath(self.link)) ==
++                     os.path.normcase(os.path.abspath(self.path)))
++        if not same_path:
++            try:
++                os.makedirs(self.link_dir, exist_ok=True)
++                try:
++                    if os.path.islink(self.link) or os.path.exists(self.link):
++                        os.unlink(self.link)
++                except OSError:
++                    pass
++                try:
++                    os.symlink(os.path.abspath(self.path), self.link)
++                except OSError:
++                    os.link(self.path, self.link)
++                stamp = os.stat(self.link)
++                self._discovery_identity = stamp.st_dev, stamp.st_ino
++            except OSError as error:
++                self.discovery_error = repr(error)
++                print(f"tap_log: preview discovery unavailable ({type(error).__name__}, "
++                      f"errno={error.errno}, winerror={getattr(error, 'winerror', None)}); "
++                      f"the sidecar remains active", flush=True)
+         # RUN HEADER (G8): a reader must be able to tell one run from the next without
+         # guessing from timestamps, and must see the pid that owns the file.
+         self.write({"ev": "run", "pid": self.pid, "src": "mini-mouth",
+@@ -89,7 +110,7 @@
+         if sealed:
+             print(f"tap_log: sealed {sealed} earlier run file(s) that never ended cleanly",
+                   flush=True)
+-        return True
++        return not bool(self.broken)
+ 
+     def write(self, record: dict) -> None:
+         if self.handle is None:
+@@ -195,7 +216,10 @@
+                 pass
+             self.handle = None
+         try:
+-            if os.path.islink(self.link):
+-                os.unlink(self.link)  # a live-pid link outliving us would mislead the tap
++            if self._discovery_identity is not None:
++                stamp = os.stat(self.link)
++                if (stamp.st_dev, stamp.st_ino) == self._discovery_identity:
++                    os.unlink(self.link)  # remove only our discovery link, never the durable log
+         except OSError:
+             pass
++        self._discovery_identity = None
