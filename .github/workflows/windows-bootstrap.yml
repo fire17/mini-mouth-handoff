@@ -1,0 +1,19 @@
+name: Windows bootstrap
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: PowerShell 7 bootstrap over real HTTP
+        shell: pwsh
+        run: ./test/bootstrap.ps1
+      - name: Windows PowerShell 5.1 bootstrap over real HTTP
+        shell: powershell
+        run: ./test/bootstrap.ps1
