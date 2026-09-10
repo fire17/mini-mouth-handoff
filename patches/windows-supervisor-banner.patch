@@ -1,0 +1,14 @@
+--- a/mini-mouth/src/windows_supervisor.py
++++ b/mini-mouth/src/windows_supervisor.py
+@@ -109,7 +109,10 @@
+           f"supervisor {row['supervisorPid']}, driver {row.get('driverPid')}; "
+           "closing this window does not stop the call.", flush=True)
+     print("Process startup is observed; wait for [configured] in the log or TUI before speaking.", flush=True)
+-    print(f"Log: {Path(runtime) / 'mini-mouth-live.log'}\nStop the call: mm stop", flush=True)
++    command = str(Path(__file__).resolve().parents[1] / "mm.cmd").replace("'", "''")
++    target = str(Path(runtime)).replace("'", "''")
++    print(f"Log: {Path(runtime) / 'mini-mouth-live.log'}\n"
++          f"Stop this call (PowerShell): & '{command}' stop --runtime-dir '{target}'", flush=True)
+ 
+ 
+ def start(runtime, *, dryrun=False, duration=0):

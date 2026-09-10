@@ -269,6 +269,9 @@ class RestartStopRace(unittest.TestCase):
             descendant = None
 
             def spawn_fixture(arguments, **kwargs):
+                # Let subprocess.run use real native cleanup (not a Python emitter).
+                if arguments[0] != sys.executable:
+                    return original_popen(arguments, **kwargs)
                 if not children:
                     script = ('import os,pathlib,subprocess,sys,time; '
                               "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],"
@@ -325,6 +328,9 @@ class RestartStopRace(unittest.TestCase):
             stop_injected = False
 
             def spawn_fixture(arguments, **kwargs):
+                # Let subprocess.run use real native cleanup (not a Python emitter).
+                if arguments[0] != sys.executable:
+                    return original_popen(arguments, **kwargs)
                 if not children:
                     script = ('import time; time.sleep(.15); '
                               'from windows_supervisor import request_restart; '

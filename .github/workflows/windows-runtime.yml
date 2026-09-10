@@ -19,6 +19,8 @@ jobs:
         run: python test/prepare-playback-fixture.py
       - name: Apply isolated Windows supervisor candidate
         run: git apply --directory=fixture patches/windows-supervisor.patch
+      - name: Include exact runtime-scoped stop command in the launch banner
+        run: git apply --directory=fixture patches/windows-supervisor-banner.patch
       - name: Include the reviewed sidecar fix in the runtime composition
         run: git apply --directory=fixture patches/tap-portability.patch
       - name: Prove lifecycle outcomes and durable diagnostics

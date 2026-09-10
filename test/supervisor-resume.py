@@ -55,10 +55,11 @@ class Driver:
 
     def test_intentional_stops_preserve_success(self):
         for statement in ('return', 'raise SystemExit(0)', 'raise KeyboardInterrupt()'):
-            with self.subTest(statement=statement):
-                child, metadata = self.run_lifecycle(statement)
-                self.assertEqual(child.returncode, 0, child.stderr)
-                self.assertIsNone(metadata)
+            for windows in (False, True):
+                with self.subTest(statement=statement, windows=windows):
+                    child, metadata = self.run_lifecycle(statement, windows=windows)
+                    self.assertEqual(child.returncode, 0, child.stderr)
+                    self.assertIsNone(metadata)
 
     def test_fatal_exits_keep_visible_failure(self):
         for statement, code, diagnostic in (
@@ -67,11 +68,12 @@ class Driver:
             ('raise asyncio.CancelledError()', 1, 'CancelledError'),
             ("raise RuntimeError('fixture socket closed')", 1, 'fixture exec failed'),
         ):
-            with self.subTest(statement=statement):
-                child, metadata = self.run_lifecycle(statement)
-                self.assertEqual(child.returncode, code, child.stderr)
-                self.assertIn(diagnostic, child.stderr)
-                self.assertIsNone(metadata)
+            for windows in ((False,) if 'RuntimeError' in statement else (False, True)):
+                with self.subTest(statement=statement, windows=windows):
+                    child, metadata = self.run_lifecycle(statement, windows=windows)
+                    self.assertEqual(child.returncode, code, child.stderr)
+                    self.assertIn(diagnostic, child.stderr)
+                    self.assertIsNone(metadata)
 
     def test_windows_resume_is_bound_and_retains_existing_backoff(self):
         for previous, backoff in ((0, 2), (4, 60)):
@@ -117,6 +119,8 @@ class OwnedRestart(unittest.TestCase):
         popen = subprocess.Popen
         launches = []
         def start(arguments, **kwargs):
+            if Path(arguments[0]).name.lower() == 'taskkill.exe':
+                return popen(arguments, **kwargs)
             index = len(self.children)
             if index == 0:
                 script = 'import os, time; time.sleep(.15); '

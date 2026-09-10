@@ -87,6 +87,8 @@ class Driver:
             children = []
             popen = subprocess.Popen
             def start(arguments, **kwargs):
+                if Path(arguments[0]).name.lower() == 'taskkill.exe':
+                    return popen(arguments, **kwargs)
                 index = len(children)
                 if index == 0:
                     script = ('import time; from windows_supervisor import write_json; '

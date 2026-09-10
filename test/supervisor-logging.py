@@ -37,6 +37,10 @@ class SupervisorLogging(unittest.TestCase):
         popen = subprocess.Popen
         sleeper = self.launcher.time.sleep
         def start(arguments, **kwargs):
+            # subprocess.run also reaches this shared Popen seam. Keep native
+            # cleanup (taskkill.exe on Windows) real; replace only Python fixtures.
+            if arguments[0] != sys.executable:
+                return popen(arguments, **kwargs)
             index = len(self.children)
             exits = role is not None and index == (0 if role == 'driver' else 1)
             script = f'import time; time.sleep({0.15 if exits else 30}); raise SystemExit({code})'
