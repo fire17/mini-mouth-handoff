@@ -1,1 +1,4 @@
 *.patch text eol=lf
+# This patch deliberately mixes LF Python with exact CRLF PowerShell context
+# from the hash-verified release archive. Preserve those context bytes.
+patches/windows-supervisor.patch -text
