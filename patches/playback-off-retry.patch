@@ -1,0 +1,108 @@
+--- a/mini-mouth/src/rt_driver.py
++++ b/mini-mouth/src/rt_driver.py
+@@ -422,7 +422,8 @@
+     # marked run must write its own copy under the test root.
+     PLAYBACK = live_wall.surface("~/.livemind/playback.json")
+ 
+-    def publish_playback(self, on_air: bool, src: str, level: int = 0) -> None:
++    def publish_playback(self, on_air: bool, src: str, level: int = 0,
++                         *, _retry_generation=None) -> bool:
+         """The ENGINE's own playback publisher, the file speech-halo reads (A55).
+ 
+         v1's engine wrote this and mini-mouth never has, so the copy on disk was hours stale
+@@ -434,6 +435,19 @@
+         a halo that cannot see the mouth is a small loss, a driver that dies publishing to it
+         is not.
+         """
++        # An OFF retry belongs to one publication and one player. A later request
++        # supersedes it even if that request itself fails to reach the file.
++        if on_air and getattr(self, "_pb_closing", False):
++            return False
++        if _retry_generation is None:
++            self._pb_generation = getattr(self, "_pb_generation", 0) + 1
++            pending = getattr(self, "_pb_retry_task", None)
++            self._pb_retry_task = None
++            if pending is not None and not pending.done():
++                pending.cancel()
++        elif _retry_generation != getattr(self, "_pb_generation", 0):
++            return False
++        fence = self._playback_file_stamp() if not on_air else False
+         try:
+             # while audio is on air the LEVEL is the point, so those writes are not deduped:
+             # speech-halo already divides playback.json's `level` by 28000 for its mouth-side
+@@ -441,7 +455,7 @@
+             # the half that turned out to be free).
+             if not on_air and (on_air, src) == getattr(self, "_pb_last", (None, None)) and \
+                     time.time() - getattr(self, "_pb_at", 0) < 1.0:
+-                return          # unchanged and recent: the ring polls, it does not need a flood
++                return True     # unchanged and recent: the ring polls, it does not need a flood
+             tmp = self.PLAYBACK + ".tmp"
+             os.makedirs(os.path.dirname(self.PLAYBACK), exist_ok=True)
+             with open(tmp, "w", encoding="utf-8") as fh:
+@@ -452,6 +466,7 @@
+                            "call": f"mini-mouth-{os.getpid()}", "ts": now_ms()}, fh)
+             os.replace(tmp, self.PLAYBACK)
+             self._pb_last, self._pb_at = (on_air, src), time.time()
++            return True
+         except OSError as error:
+             # A Windows sharing/permission failure must not look like a successful
+             # update or suppress the next retry. Report no path or arbitrary text.
+@@ -461,6 +476,42 @@
+                 print(f"driver: ⚠ error playback metadata write failed ({type(error).__name__}, "
+                       f"errno={error.errno}, winerror={getattr(error, 'winerror', None)})",
+                       flush=True)
++            if not on_air and _retry_generation is None and fence is not False:
++                # Active cursors already retry every 150 ms. Only a final/idle OFF
++                # needs its own bounded recovery, with no sleeping in the caller.
++                try:
++                    loop = asyncio.get_running_loop()
++                except RuntimeError:
++                    pass  # a synchronous caller has no background loop to own this
++                else:
++                    self._pb_retry_task = loop.create_task(self._retry_playback_off(
++                        self._pb_generation, src, getattr(self, "player", None), fence))
++            return False
++
++    def _playback_file_stamp(self):
++        """A retry must not overwrite a file another publisher replaced meanwhile."""
++        try:
++            stat = os.stat(self.PLAYBACK)
++            return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
++        except FileNotFoundError:
++            return None
++        except OSError:
++            return False  # ownership cannot be checked; decline background retries
++
++    async def _retry_playback_off(self, generation, src, player, fence) -> None:
++        # Five attempts over 1.55 s. No ON snapshot is ever replayed in background.
++        for delay in (0.05, 0.10, 0.20, 0.40, 0.80):
++            await asyncio.sleep(delay)
++            if generation != getattr(self, "_pb_generation", 0):
++                return
++            if not getattr(self, "_pb_closing", False):
++                current = getattr(self, "player", None)
++                if current is not player or (current is not None and current.active):
++                    return
++            if self._playback_file_stamp() != fence:
++                return
++            if self.publish_playback(False, src, _retry_generation=generation):
++                return
+ 
+     _mic_missing_said = False
+ 
+@@ -4612,8 +4663,15 @@
+         finally:
+             subscription.cancel()
+             self.clear_liveness("closed")
++            self._pb_closing = True  # late cursor ticks must not restore ON during shutdown
+             self._pb_last = None  # shutdown must clear even after a recent idle write
+             self.publish_playback(False, "mouth")
++            pending = getattr(self, "_pb_retry_task", None)
++            if pending is not None and not pending.done():
++                try:
++                    await asyncio.wait_for(pending, timeout=2.0)
++                except asyncio.TimeoutError:
++                    pass  # best effort; an enduring lock cannot hold shutdown open
+             print("driver: closed", flush=True)
+ 
+     # THE KEYS A DEAD DRIVER MUST NOT LEAVE BEHIND. Each one is a claim about right now.

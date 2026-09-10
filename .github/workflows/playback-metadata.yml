@@ -1,0 +1,26 @@
+name: Playback metadata
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  metadata:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare hash-verified public source fixture
+        run: python test/prepare-playback-fixture.py
+      - name: Reproduce published r5 metadata behavior
+        run: python test/playback-r5-audit.py fixture-r5.zip
+      - name: Apply the reviewed metadata retry patch
+        run: git apply --check --directory=fixture patches/playback-off-retry.patch
+      - run: git apply --directory=fixture patches/playback-off-retry.patch
+      - name: Prove bounded retry and stale-player protection
+        run: python test/playback-retry.py --source fixture/mini-mouth/src/rt_driver.py
