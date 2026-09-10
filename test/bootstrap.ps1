@@ -40,8 +40,8 @@ Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value 'called'
     $source = Get-Content -LiteralPath (Join-Path $repository 'init.ps1') -Raw -Encoding UTF8
     # Substitute only the two pinned release constants in the actual bootstrap;
     # the production script has no test bypass or configurable verification hash.
-    $urlPattern = '(?m)^\$BundleUrl = ''[^'']+''$'
-    $hashPattern = '(?m)^\$BundleSha256 = ''[a-f0-9]{64}''$'
+    $urlPattern = '(?m)^\$BundleUrl = ''[^'']+''\r?$'
+    $hashPattern = '(?m)^\$BundleSha256 = ''[a-f0-9]{64}''\r?$'
     if ([regex]::Matches($source, $urlPattern).Count -ne 1 -or [regex]::Matches($source, $hashPattern).Count -ne 1) {
         throw 'Expected exactly one pinned URL and valid SHA256 constant.'
     }
