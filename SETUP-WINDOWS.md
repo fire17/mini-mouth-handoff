@@ -40,6 +40,8 @@ Optional local Whisper transcription is off when neither backend is installed; s
 
 The log is `%USERPROFILE%\.livemind\mini-mouth-live.log`. If the driver exits, the supervisor stops its remaining children and prints the log path. Application-specific tools inherited from the source (other LiveMind programs, clipboard history, app control, relay) require software outside this bundle and may refuse requests. This candidate provides conversation, typed turns, speech, and the state watcher.
 
+The bundled XO backend uses inclusive successor IDs when replaying Redis Streams, including on Redis 5. Existing installations must reinstall the bundled XO package after upgrading this archive; editing its source directory alone does not update the virtual environment. This follows [Redis's documented iteration method for versions before 6.2](https://redis.io/docs/latest/commands/xrange/#iterating-with-earlier-versions-of-redis).
+
 ## Verification boundary
 
 This candidate combines all six Windows work items and isolated integration fixes. Automated checks run on macOS: actual PowerShell parsing, portable Python fixtures, normal Python wheel contents/imports, process supervisor dryrun cleanup, and clean archive inspection. It has **not been run on a Windows machine or in a live OpenAI call**. First Windows execution must confirm winget/UAC, Memurai startup, FFmpeg device access, playback, Caps Lock changes, ESC, and Ctrl-C process cleanup.
