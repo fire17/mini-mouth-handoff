@@ -1,0 +1,268 @@
+--- a/mini-mouth/tui.py
++++ b/mini-mouth/tui.py
+@@ -26,6 +26,27 @@
+ # raw logical order; MM_BIDI=1 uses python-bidi instead.
+ import os as _os
+ 
++# ---- Windows port (v0.1.4 candidate, 2026-09-11) -------------------------------------------
++# The Mac TUI unchanged; on Windows the console must speak VT (ANSI) and UTF-8 before the first
++# paint, the keyboard comes from msvcrt (no termios/tty), and a resize is polled (no SIGWINCH).
++_WIN = _os.name == "nt"
++if _WIN:
++    try:
++        import ctypes as _ct
++        _k32 = _ct.windll.kernel32
++        for _std in (-11, -12):                      # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
++            _hd = _k32.GetStdHandle(_std)
++            _md = _ct.c_uint32()
++            if _k32.GetConsoleMode(_hd, _ct.byref(_md)):
++                _k32.SetConsoleMode(_hd, _md.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
++    except Exception:
++        pass
++    for _stream in (sys.stdout, sys.stderr):
++        try:
++            _stream.reconfigure(encoding="utf-8", errors="replace")
++        except Exception:
++            pass
++
+ _LTR_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .,:/@'\-]*[A-Za-z0-9]|[A-Za-z0-9]")
+ _MIRROR = str.maketrans("()[]{}<>", ")(][}{><")
+ 
+@@ -1542,6 +1563,7 @@
+ # `mm text "<words>"` sends it as a USER text turn (the builder's verb) — off the keyboard thread.
+ TYPED = {"ed": None, "focus": False, "sent": "", "sent_at": 0.0}   # sent/sent_at: the last line THIS TUI sent — rt.status.typed for it is not printed twice
+ MM = Path(__file__).resolve().parent / "mm"
++MM_CMD = [sys.executable, str(MM)] if _WIN else [str(MM)]   # Windows cannot exec a shebang script: run mm through this interpreter
+ 
+ 
+ def typed_editor():
+@@ -1564,7 +1586,7 @@
+ 
+     def run() -> None:
+         try:
+-            r = _run([str(MM), "text", text], capture_output=True, text=True, timeout=30)
++            r = _run(MM_CMD + ["text", text], capture_output=True, text=True, timeout=30)
+         except Exception as error:
+             stream.emit(RED + f"   ⚠ mm text: {error}" + RESET)
+             return
+@@ -1604,14 +1626,15 @@
+         send_text_turn(text)
+ 
+ 
+-def _key_loop_editor(fd: int, ed) -> None:
++def _key_loop_editor(fd: int, ed, reader=None) -> None:
+     """The keyboard thread with the line editor in the bar (see TYPED). Keys come named from tui_panels.read_key
+-    (arrows, opt/ctrl arrows, Home/End, fn+delete, the ctrl bytes) and go to asks_tui.LineEdit through tui_asks._ed_key."""
++    (arrows, opt/ctrl arrows, Home/End, fn+delete, the ctrl bytes) and go to asks_tui.LineEdit through tui_asks._ed_key.
++    `reader` (Windows) replaces read_key(fd, 0.5) with the msvcrt twin."""
+     from tui_panels import read_key
+     from tui_asks import _ed_key
+     while True:
+         try:
+-            k = read_key(fd, 0.5)
++            k = reader() if reader is not None else read_key(fd, 0.5)
+         except OSError:
+             return
+         if k is None:
+@@ -1624,7 +1647,7 @@
+                 paint_bar()
+             continue
+         if k == "ctrl-c":
+-            _os.kill(_os.getpid(), signal.SIGINT)
++            _interrupt_self()
+             return
+         if k == "tab":
+             toggle_mute()
+@@ -1669,7 +1692,7 @@
+     import tui_gaps
+     with IO:
+         confirmed = tui_gaps.run_view(
+-            lambda: tui_gaps.key_from_bytes(lambda: _os.read(fd, 1)),
++            lambda: tui_gaps.key_from_bytes(_win_byte_reader() if _WIN else (lambda: _os.read(fd, 1))),
+             lambda s: (sys.stdout.write(s), sys.stdout.flush()),
+             width, rows)
+     setup_bar()
+@@ -1712,9 +1735,119 @@
+             pass
+ 
+ 
++def _interrupt_self() -> None:
++    """Ctrl-C typed inside the TUI: run the SIGINT handler (cleanup + exit) on every platform."""
++    if _WIN:
++        import _thread
++        _thread.interrupt_main()          # raises the registered SIGINT handler in the main thread
++    else:
++        _os.kill(_os.getpid(), signal.SIGINT)
++
++
++def _win_read_key(timeout: float):
++    """Windows twin of tui_panels.read_key: one key NAME (same vocabulary) or None on timeout.
++    msvcrt delivers arrows/Home/End/Delete as a 0x00/0xE0 prefix + a code; ctrl-arrows likewise."""
++    import msvcrt
++    end = time.time() + timeout
++    while not msvcrt.kbhit():
++        if time.time() >= end:
++            return None
++        time.sleep(0.01)
++    ch = msvcrt.getwch()
++    if ch in ("\x00", "\xe0"):
++        code = msvcrt.getwch()
++        return {"H": "up", "P": "down", "M": "right", "K": "left", "G": "home", "O": "end", "S": "delete",
++                "s": "ctrl-left", "t": "ctrl-right", "\x8d": "ctrl-up", "\x91": "ctrl-down",
++                "w": "home", "u": "end", "R": "", "I": "", "Q": ""}.get(code, "")
++    if ch in ("\r", "\n"):
++        return "enter"
++    if ch in ("\x7f", "\x08"):
++        return "backspace"
++    if ch == "\t":
++        return "tab"
++    if ch == "\x03":
++        return "ctrl-c"
++    if ch == "\x1b":
++        return "esc"
++    try:
++        from tui_panels import _CTRL
++        named = _CTRL.get(ch.encode("latin-1", "ignore"))
++        if named:
++            return named
++    except Exception:
++        pass
++    return ch
++
++
++def _win_byte_reader():
++    """Bytes for tui_gaps.key_from_bytes on Windows (arrows arrive as CSI sequences)."""
++    import msvcrt
++    pending = []
++
++    def read():
++        if pending:
++            return pending.pop(0)
++        ch = msvcrt.getwch()
++        if ch in ("\x00", "\xe0"):
++            code = msvcrt.getwch()
++            seq = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D"}.get(code, b"")
++            if not seq:
++                return b""
++            pending.extend(bytes([b]) for b in seq[1:])
++            return seq[:1]
++        b = ch.encode("utf-8", "replace")
++        pending.extend(bytes([x]) for x in b[1:])
++        return b[:1]
++    return read
++
++
++def _keyboard_thread_win() -> None:
++    """The keyboard thread on Windows: same behaviour as keyboard_thread, keys from msvcrt."""
++    ed = typed_editor()
++    if ed is not None:
++        try:
++            from tui_asks import _ed_key  # noqa: F401
++            _key_loop_editor(0, ed, reader=lambda: _win_read_key(0.5))
++            return
++        except ImportError:
++            pass
++    buf = ""
++    while True:
++        k = _win_read_key(0.5)
++        if k is None:
++            continue
++        if k == "ctrl-c":
++            _interrupt_self()
++            return
++        if k == "enter":
++            text, buf = buf, ""
++            INPUT["text"] = ""
++            dispatch_input(text)
++        elif k == "esc":
++            buf = ""
++            INPUT["text"] = ""
++        elif k == "tab":
++            toggle_mute()
++        elif k == "\x07":
++            buf = ""
++            INPUT["text"] = ""
++            open_gaps_view(0)
++        elif k == "backspace":
++            buf = buf[:-1]
++            INPUT["text"] = buf
++        elif UI["ask"] and not buf and len(k) == 1 and k.isdigit() and k != "0":
++            ui_answer(int(k) - 1)
++        elif len(k) == 1:
++            buf += k
++            INPUT["text"] = buf
++        paint_bar()
++
++
+ def keyboard_thread() -> None:
+     """Raw keys from stdin: printable → input line; Enter → dispatch; Esc →
+     clear; Tab → mute toggle; Backspace edits. Ctrl-C still exits."""
++    if _WIN:
++        return _keyboard_thread_win()
+     import termios
+     import tty
+     fd = sys.stdin.fileno()
+@@ -1749,7 +1882,7 @@
+         if not ch:
+             return
+         if ch == b"\x03":  # Ctrl-C
+-            _os.kill(_os.getpid(), signal.SIGINT)
++            _interrupt_self()
+             return
+         if ch in (b"\r", b"\n"):
+             text = buf.decode("utf-8", "replace")
+@@ -2590,7 +2723,25 @@
+ import threading as _threading
+ if sys.stdin.isatty():
+     _threading.Thread(target=keyboard_thread, name="keyboard", daemon=True).start()
+-signal.signal(signal.SIGWINCH, lambda *a: (setup_bar(), paint_bar(), paint_pins()))
++if hasattr(signal, "SIGWINCH"):
++    signal.signal(signal.SIGWINCH, lambda *a: (setup_bar(), paint_bar(), paint_pins()))
++else:
++    def _resize_poll() -> None:
++        """Windows has no SIGWINCH: poll the console size every 250 ms and take the same redraw path."""
++        last = shutil.get_terminal_size((100, 24))
++        while True:
++            time.sleep(0.25)
++            cur = shutil.get_terminal_size((100, 24))
++            if cur != last:
++                last = cur
++                try:
++                    with IO:
++                        setup_bar()
++                        paint_bar()
++                        paint_pins()
++                except Exception:
++                    pass
++    _threading.Thread(target=_resize_poll, daemon=True, name="resize-poll").start()
+ threading.Thread(target=_status_poll, daemon=True, name="status-poll").start()
+ 
+ # HOT RELOAD (his ask, voice 2026-09-01): when this file (or the mouth lib)
+@@ -2648,13 +2799,13 @@
+     try:
+         _os.makedirs(_os.path.dirname(TUI_CRASH_LOG), exist_ok=True)
+         with open(TUI_CRASH_LOG, "a", encoding="utf-8") as fh:
+-            fh.write(f"=== tui {_os.getpid()} {time.strftime('%Y-%m-%dT%H:%M:%S')} py{sys.version_info.major}.{sys.version_info.minor} tty {_os.ttyname(0) if _os.isatty(0) else '?'}: {text}\n")
++            fh.write(f"=== tui {_os.getpid()} {time.strftime('%Y-%m-%dT%H:%M:%S')} py{sys.version_info.major}.{sys.version_info.minor} tty {_os.ttyname(0) if hasattr(_os, 'ttyname') and _os.isatty(0) else ('con' if _os.isatty(0) else '?')}: {text}\n")
+     except Exception:
+         pass
+ 
+ 
+ _atexit.register(lambda: _crash_note("exit (atexit) — normal or sys.exit"))
+-for _sig in (signal.SIGTERM, signal.SIGHUP):
++for _sig in [s for s in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None)) if s is not None]:
+     # after the tty is his again the process leaves AT ONCE: sys.exit would wait in threading._shutdown for the
+     # non-daemon graph thread (9 s in the suite's pty runs, a lingering pid in his pane) — _os._exit skips that
+     signal.signal(_sig, lambda n, f: (LOOP.__setitem__("done", True), _crash_note(f"signal {n} — dying"), sub.cancel(), teardown_bar(), restore_tty(), _os._exit(128 + n)))
+@@ -2791,4 +2942,11 @@
+         teardown_bar()
+         restore_tty()
+         _crash_note("hot reload — execv of the same interpreter")
++        if _WIN:
++            # Windows has no in-place exec: execv would spawn a new pid and end this one, and the console wrapper
++            # (Start-TUI.ps1) waiting on THIS pid would close the window around the replacement. Run the fresh
++            # interpreter as a child in the same console and leave with its exit code.
++            import subprocess as _sp
++            _code = _sp.call([sys.executable, "-u", str(Path(__file__))])
++            _os._exit(_code)
+         _os.execv(sys.executable, [sys.executable, "-u", str(Path(__file__))])
