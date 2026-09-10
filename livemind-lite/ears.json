@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "me": "mind",
+  "ears": {
+    "user-inputs": {"enabled": true},
+    "system": {"enabled": true},
+    "board": {"enabled": false, "desc": "LiveMind asks board — not present on a handoff machine"},
+    "bus": {"enabled": false, "desc": "LiveMind organ bus — not present on a handoff machine"}
+  }
+}

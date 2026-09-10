@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# lm-ear (macOS/Linux) — the ear on the local mini-mouth call. One line per event, unbuffered.
+#   Monitor({ command: "<this dir>/lm-ear", persistent: true })   # Claude Code / any agent with a monitor tool
+#   ./lm-ear --selftest                                            # exit 0 = every ear fires on real lines
+D="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
+export LM_EARS="${LM_EARS:-$D/ears.json}"
+exec python3 -u "$D/mm-ear.py" "$@"
