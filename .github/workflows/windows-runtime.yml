@@ -1,0 +1,29 @@
+name: Windows runtime lifecycle
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare hash-verified public source fixture
+        run: python test/prepare-playback-fixture.py
+      - name: Apply isolated Windows supervisor candidate
+        run: git apply --directory=fixture patches/windows-supervisor.patch
+      - name: Prove lifecycle outcomes and durable diagnostics
+        run: python test/supervisor-logging.py --source fixture/mini-mouth/src/windows_launcher.py
+      - name: Prove detached ownership, window closure and scoped stop
+        env:
+          MM_REQUIRE_WINDOWS_SUPERVISOR_TEST: ${{ runner.os == 'Windows' && '1' || '0' }}
+        run: python test/supervisor-lifecycle.py --source fixture/mini-mouth/src/windows_launcher.py
+      - name: Prove supervised recovery and preserved failure outcomes
+        run: python test/supervisor-resume.py --source fixture/mini-mouth

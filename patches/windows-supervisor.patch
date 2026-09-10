@@ -1,0 +1,642 @@
+--- a/mini-mouth/src/windows_launcher.py
++++ b/mini-mouth/src/windows_launcher.py
+@@ -2,6 +2,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import json
+ import os
+ from pathlib import Path
+ import shutil
+@@ -12,6 +13,10 @@
+ import time
+ 
+ 
++class StopRequested(Exception):
++    pass
++
++
+ def redis_ready(host="127.0.0.1", port=6379):
+     try:
+         with socket.create_connection((host, port), timeout=1) as conn:
+@@ -32,8 +37,13 @@
+         return
+     if sys.platform == "win32":
+         # Each child is still our direct live child; never reap by executable name.
+-        subprocess.run(["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
+-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
++        killed = subprocess.run(["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
++                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
++        if killed.returncode:
++            if proc.poll() is None:
++                proc.kill()
++                proc.wait(timeout=5)
++            raise RuntimeError(f"taskkill returned {killed.returncode}; owned descendant cleanup is unconfirmed")
+     else:  # only reachable in a disposable --dryrun on the verification host
+         proc.terminate()
+     try:
+@@ -43,17 +53,27 @@
+         proc.wait(timeout=5)
+ 
+ 
+-def main(argv=None):
++def main(argv=None, *, owner=None):
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--dryrun", action="store_true")
+     parser.add_argument("--duration", type=float, default=0,
+                         help="Stop after this many seconds; dryrun only")
+     parser.add_argument("--runtime-dir", type=Path)
++    parser.add_argument("--background", action="store_true", help="Detached fixture service; normal Windows launches already run in background")
++    parser.add_argument("--stop", action="store_true", help="Stop this runtime directory's supervised call")
+     args = parser.parse_args(argv)
+-    if sys.platform != "win32" and not args.dryrun:
++    if sys.platform != "win32" and not args.dryrun and not args.stop:
+         parser.error("Use app/run.sh on macOS. This launcher serves Windows.")
+     if args.duration and not args.dryrun:
+         parser.error("--duration requires --dryrun")
++    if owner is None and (args.stop or args.background or not args.dryrun):
++        import windows_supervisor
++        runtime = args.runtime_dir or (Path.home() / ".livemind")
++        if args.dryrun and not args.runtime_dir:
++            parser.error("detached --dryrun requires --runtime-dir for explicit cleanup")
++        if args.stop:
++            return windows_supervisor.stop(runtime)
++        return windows_supervisor.start(runtime, dryrun=args.dryrun, duration=args.duration)
+     root = Path(__file__).resolve().parents[1]
+     # Dryruns never touch the user's runtime directory or Redis, even without overrides.
+     scratch = tempfile.TemporaryDirectory(prefix="mm-launch-") if args.dryrun and not args.runtime_dir else None
+@@ -61,18 +81,48 @@
+     runtime.mkdir(parents=True, exist_ok=True)
+     log_path = runtime / "mini-mouth-live.log"
+     children = []
++    accepted_restart_exits = set()
+     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", MM_BARGE="0")
++    if owner is not None:
++        from windows_supervisor import RESTART
++        env["MM_WINDOWS_SUPERVISOR_SESSION"] = owner.state["session"]
++        env["MM_WINDOWS_SUPERVISOR_RESTART_PATH"] = str(owner.runtime / RESTART)
+     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+     result = 0
++
++    def check_stop():
++        if owner is not None and owner.stop_requested():
++            raise StopRequested()
++
++    def record(event, **fields):
++        # Child output goes to different streams. Keep the supervisor's decision
++        # beside the durable driver log so closing the watching window cannot
++        # erase why the driver was stopped. No transcript or environment values.
++        nonlocal result
++        row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"),
++               "supervisor_pid": os.getpid(), "event": event, **fields}
++        try:
++            with log_path.open("a", encoding="utf-8") as lifecycle_log:
++                lifecycle_log.write("windows-launcher: " + json.dumps(row) + "\n")
++                lifecycle_log.flush()
++        except OSError as error:
++            print(f"mini-mouth: cannot record supervisor event {event}: {error}",
++                  file=sys.stderr, flush=True)
++            result = result or 1
++
+     try:
+         with log_path.open("a", encoding="utf-8") as log:
+-            def start(arguments, *, output=log):
++            def start(arguments, *, role, output=log):
+                 proc = subprocess.Popen(arguments, cwd=root, env=env,
+                                         stdin=subprocess.DEVNULL, stdout=output,
+                                         stderr=output, creationflags=flags)
+-                children.append(proc)
++                children.append((role, proc))
++                record("child_started", role=role, pid=proc.pid)
++                if owner is not None:
++                    owner.child_started(role, proc)
+                 return proc
+ 
++            check_stop()
+             if not args.dryrun:
+                 import mm_platform
+                 for binary in ("ffmpeg", "ffplay"):
+@@ -86,51 +136,100 @@
+                 server = next((p for p in candidates if p and Path(p).is_file()), None)
+                 if not server:
+                     raise RuntimeError("Redis is unavailable at 127.0.0.1:6379. Rerun Install.ps1 with -InstallSystemDependencies -RedisMode Memurai, or start your local Redis server.")
+-                start([server, "--bind", "127.0.0.1", "--port", "6379", "--save", "", "--appendonly", "no"])
++                start([server, "--bind", "127.0.0.1", "--port", "6379", "--save", "", "--appendonly", "no"], role="redis")
+                 for _ in range(20):
+                     if redis_ready():
+                         break
+                     time.sleep(.25)
+                 if not redis_ready():
+                     raise RuntimeError(f"Redis did not answer PING; see {log_path}")
++            check_stop()
+             log.write(f"\n=== Windows launcher {time.strftime('%Y-%m-%dT%H:%M:%S')} ===\n")
+             log.flush()
+             if args.dryrun:
+-                driver = start([sys.executable, "-c", "import time; time.sleep(3600)"])
+-                watcher = start([sys.executable, "-c", "import time; time.sleep(3600)"])
++                driver = start([sys.executable, "-c", "import time; time.sleep(3600)"], role="driver")
++                watcher = start([sys.executable, "-c", "import time; time.sleep(3600)"], role="watcher")
+             else:
+-                driver = start([sys.executable, "-u", str(root / "live.py")])
++                driver = start([sys.executable, "-u", str(root / "live.py")], role="driver")
+                 # Catch import/credential failures before presenting a watching window.
+                 time.sleep(1)
+                 if driver.poll() is not None:
++                    record("driver_exit", pid=driver.pid, exit_code=driver.returncode, phase="startup")
+                     raise RuntimeError(f"Driver exited ({driver.returncode}); see {log_path}")
+-                start([sys.executable, "-u", str(root / "src/mm_esc_win.py")])
+-                watcher = start([sys.executable, "-u", str(root / "watch.py")], output=None)
+-            print(f"mini-mouth: driver {driver.pid}; log {log_path}; Ctrl-C to stop", flush=True)
++                start([sys.executable, "-u", str(root / "src/mm_esc_win.py")], role="escape")
++                watcher = start([sys.executable, "-u", str(root / "watch.py")], role="watcher")
++            check_stop()
++            if owner is not None:
++                owner.ready()
++            print(f"mini-mouth: driver {driver.pid}; log {log_path}; "
++                  + ("mm stop to stop" if owner is not None else "Ctrl-C to stop"), flush=True)
+             began = time.monotonic()
++            watcher_reported = False
+             while True:
++                if owner is not None and owner.stop_requested():
++                    record("stop_requested", session=owner.state["session"])
++                    break
+                 if driver.poll() is not None:
+-                    result = driver.returncode or 1
+-                    print(f"mini-mouth: driver stopped ({result}); see {log_path}", file=sys.stderr)
+-                    break
+-                if watcher.poll() is not None:
+-                    result = watcher.returncode or 0
+-                    break
++                    crashes = owner.restart_crashes(driver) if owner is not None else None
++                    if crashes is not None:
++                        accepted_restart_exits.add(driver.pid)
++                    if owner is not None and owner.stop_requested():
++                        record("stop_requested", phase="driver_exit")
++                        break
++                    if crashes is not None:
++                        record("driver_restart", pid=driver.pid, exit_code=driver.returncode,
++                               crashes_in_window=len(crashes))
++                        env["MM_RESUME_CRASHES"] = ",".join(f"{t:.0f}" for t in crashes)
++                        arguments = ([sys.executable, "-c", "import time; time.sleep(3600)"]
++                                     if args.dryrun else [sys.executable, "-u", str(root / "live.py")])
++                        driver = start(arguments, role="driver")
++                        continue
++                    result = driver.returncode or (0 if owner is not None else 1)
++                    record("driver_exit", pid=driver.pid, exit_code=driver.returncode, phase="running")
++                    print(f"mini-mouth: driver stopped (child exit {driver.returncode}; supervisor exit {result}); see {log_path}", file=sys.stderr, flush=True)
++                    break
++                if watcher.poll() is not None and not watcher_reported:
++                    watcher_reported = True
++                    record("watcher_exit", pid=watcher.pid, exit_code=watcher.returncode)
++                    if owner is None:
++                        result = watcher.returncode or result
++                        print(f"mini-mouth: watcher stopped ({watcher.returncode}); stopping owned children; see {log_path}", file=sys.stderr, flush=True)
++                        break
++                    print(f"mini-mouth: watcher stopped ({watcher.returncode}); call remains active", file=sys.stderr, flush=True)
+                 if args.dryrun and args.duration and time.monotonic() - began >= args.duration:
++                    record("duration_elapsed")
+                     break
+                 time.sleep(.1)
++    except StopRequested:
++        record("stop_requested", phase="startup")
+     except KeyboardInterrupt:
+-        pass
++        record("interrupted", reason="KeyboardInterrupt")
+     except (OSError, RuntimeError) as exc:
+         print(f"mini-mouth: {exc}", file=sys.stderr)
+         result = 1
++        record("supervisor_error", error_type=type(exc).__name__, detail=str(exc))
+     finally:
+-        for proc in reversed(children):
++        for role, proc in reversed(children):
+             try:
++                was_running = proc.poll() is None
++                if owner is not None and role == "driver" and not was_running and proc.returncode != 0:
++                    clean_handoff = (proc.pid in accepted_restart_exits
++                                     or owner.restart_crashes(proc) is not None)
++                    if not clean_handoff:
++                        owner.cleanup_failed = True
++                        result = result or 1
++                        record("descendant_cleanup_unconfirmed", role=role, pid=proc.pid,
++                               exit_code=proc.returncode)
+                 stop_child(proc)
+-            except (OSError, subprocess.SubprocessError) as exc:
++                record("child_stopped", role=role, pid=proc.pid,
++                       was_running=was_running, exit_code=proc.returncode)
++            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                 print(f"mini-mouth: cleanup failed for owned child {proc.pid}: {exc}", file=sys.stderr)
+                 result = 1
++                if owner is not None:
++                    owner.cleanup_failed = True
++                record("cleanup_error", role=role, pid=proc.pid, error_type=type(exc).__name__)
++        record("supervisor_exit", exit_code=result)
+         if scratch:
+             scratch.cleanup()
+     return result
+--- /dev/null
++++ b/mini-mouth/src/windows_supervisor.py
+@@ -0,0 +1,293 @@
++"""Detached Windows call ownership and local, generation-bound stop control."""
++from __future__ import annotations
++
++import argparse
++import contextlib
++import json
++import math
++import os
++from pathlib import Path
++import secrets
++import subprocess
++import sys
++import time
++
++STATE = "mini-mouth-supervisor.json"
++STOP = "mini-mouth-supervisor.stop.json"
++LOCK = "mini-mouth-supervisor.lock"
++RESTART = "mini-mouth-supervisor.restart.json"
++RESTART_CODE = 75
++
++
++def read_json(path):
++    try:
++        with Path(path).open("rb") as handle:
++            raw = handle.read(16385)
++        if len(raw) > 16384:
++            return None
++        row = json.loads(raw)
++        return row if isinstance(row, dict) else None
++    except (OSError, ValueError):
++        return None
++
++
++def write_json(path, row):
++    path = Path(path)
++    temporary = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
++    try:
++        with temporary.open("w", encoding="utf-8") as handle:
++            json.dump(row, handle)
++            handle.write("\n")
++            handle.flush()
++        for attempt in range(8):
++            try:
++                os.replace(temporary, path)
++                return
++            except PermissionError:
++                if attempt == 7:
++                    raise
++                time.sleep(.025)
++    finally:
++        try:
++            temporary.unlink()
++        except FileNotFoundError:
++            pass
++
++
++@contextlib.contextmanager
++def ownership_lock(runtime):
++    runtime = Path(runtime)
++    runtime.mkdir(parents=True, exist_ok=True)
++    handle = (runtime / LOCK).open("a+b")
++    try:
++        if handle.seek(0, os.SEEK_END) == 0:
++            handle.write(b"\0")
++            handle.flush()
++        handle.seek(0)
++        if sys.platform == "win32":
++            import msvcrt
++            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
++        else:
++            import fcntl
++            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        try:
++            yield
++        finally:
++            handle.seek(0)
++            if sys.platform == "win32":
++                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
++            else:
++                fcntl.flock(handle, fcntl.LOCK_UN)
++    finally:
++        handle.close()
++
++
++def is_locked(runtime):
++    try:
++        with ownership_lock(runtime):
++            return False
++    except (BlockingIOError, PermissionError):
++        return True
++    except OSError as error:
++        # msvcrt reports lock contention as EACCES/EDEADLK.
++        if error.errno in (11, 13, 36):
++            return True
++        raise
++
++
++def valid_owner(row):
++    return (isinstance(row, dict) and row.get("v") == 1
++            and isinstance(row.get("session"), str) and len(row["session"]) == 32
++            and all(c in "0123456789abcdef" for c in row["session"])
++            and isinstance(row.get("supervisorPid"), int) and row["supervisorPid"] > 0)
++
++
++def banner(runtime, row, reused=False):
++    print(f"mini-mouth: {'using existing' if reused else 'started'} background call; "
++          f"supervisor {row['supervisorPid']}, driver {row.get('driverPid')}; "
++          "closing this window does not stop the call.", flush=True)
++    print("Process startup is observed; wait for [configured] in the log or TUI before speaking.", flush=True)
++    print(f"Log: {Path(runtime) / 'mini-mouth-live.log'}\nStop the call: mm stop", flush=True)
++
++
++def start(runtime, *, dryrun=False, duration=0):
++    runtime = Path(runtime).resolve()
++    runtime.mkdir(parents=True, exist_ok=True)
++    previous = read_json(runtime / STATE)
++    locked = is_locked(runtime)
++    if locked and valid_owner(previous) and previous.get("phase") == "running":
++        banner(runtime, previous, reused=True)
++        return 0
++    if (not locked and valid_owner(previous)
++            and (previous.get("phase") in ("starting", "running")
++                 or previous.get("cleanupComplete") is False)):
++        print("mini-mouth: previous supervisor disappeared; its children have not been "
++              "confirmed stopped. Inspect the saved session and log before starting another call.", file=sys.stderr)
++        return 1
++    session = secrets.token_hex(16)
++    proc = None
++    if not locked:
++        arguments = [sys.executable, "-u", str(Path(__file__).resolve()), "serve",
++                     "--session", session, "--runtime-dir", str(runtime)]
++        if dryrun:
++            arguments += ["--dryrun", "--duration", str(duration)]
++        options = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
++                   if sys.platform == "win32" else {"start_new_session": True})
++        with (runtime / "mini-mouth-live.log").open("ab", buffering=0) as log:
++            proc = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log,
++                                    stderr=log, close_fds=True, **options)
++    deadline = time.monotonic() + 30
++    while time.monotonic() < deadline:
++        row = read_json(runtime / STATE)
++        if valid_owner(row) and is_locked(runtime):
++            if row.get("phase") == "running":
++                banner(runtime, row, reused=row["session"] != session)
++                return 0
++        if valid_owner(row) and row.get("session") == session and row.get("phase") in ("stopped", "failed"):
++            print(f"mini-mouth: background startup ended ({row.get('exitCode')}); "
++                  f"see {runtime / 'mini-mouth-live.log'}", file=sys.stderr)
++            return row.get("exitCode") or 1
++        if proc is not None and proc.poll() is not None and not is_locked(runtime):
++            print(f"mini-mouth: background supervisor exited ({proc.returncode}); "
++                  f"see {runtime / 'mini-mouth-live.log'}", file=sys.stderr)
++            return proc.returncode or 1
++        time.sleep(.05)
++    print("mini-mouth: supervisor readiness was not observed within 30 seconds; "
++          f"inspect {runtime / STATE} and the log. No second driver was started.", file=sys.stderr)
++    return 1
++
++
++def stop(runtime, *, timeout=60):
++    runtime = Path(runtime).resolve()
++    owner = read_json(runtime / STATE)
++    if not is_locked(runtime):
++        if valid_owner(owner) and owner.get("phase") in ("starting", "running"):
++            print("mini-mouth: supervisor is absent; previous children are unconfirmed. "
++                  "No PID was killed from stale state.", file=sys.stderr)
++            return 1
++        if valid_owner(owner) and owner.get("phase") == "failed":
++            print("mini-mouth: previous session ended with a failure; inspect its log.", file=sys.stderr)
++            return owner.get("exitCode") or 1
++        print("mini-mouth: no supervised call is running.", flush=True)
++        return 0
++    if not valid_owner(owner):
++        print("mini-mouth: supervisor owner state is not readable; no stop was sent.", file=sys.stderr)
++        return 1
++    request = {"v": 1, "session": owner["session"], "supervisorPid": owner["supervisorPid"]}
++    write_json(runtime / STOP, request)
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        row = read_json(runtime / STATE)
++        if valid_owner(row) and row["session"] != owner["session"]:
++            print("mini-mouth: supervisor session changed; the replacement was not stopped.", file=sys.stderr)
++            return 1
++        if valid_owner(row) and row.get("phase") in ("stopped", "failed") and not is_locked(runtime):
++            code = row.get("exitCode") or 0
++            if row["phase"] == "stopped" and code == 0:
++                print("mini-mouth: call stopped; owned child cleanup completed.", flush=True)
++                return 0
++            print(f"mini-mouth: session ended with failure ({code or 1}); see its log.", file=sys.stderr)
++            return code or 1
++        time.sleep(.05)
++    print("mini-mouth: stop requested, but cleanup was not observed within the deadline; "
++          "inspect the session log.", file=sys.stderr)
++    return 1
++
++
++class Owner:
++    def __init__(self, runtime, session):
++        self.runtime = Path(runtime)
++        self.state = {"v": 1, "session": session, "supervisorPid": os.getpid(),
++                      "phase": "starting", "driverPid": None, "children": {}}
++        self.cleanup_failed = False
++        self.save()
++
++    def save(self):
++        self.state["updatedAt"] = time.time()
++        write_json(self.runtime / STATE, self.state)
++
++    def child_started(self, role, proc):
++        self.state["children"][role] = proc.pid
++        if role == "driver":
++            self.state["driverPid"] = proc.pid
++        self.save()
++
++    def ready(self):
++        self.state["phase"] = "running"
++        self.save()
++
++    def stop_requested(self):
++        row = read_json(self.runtime / STOP)
++        return bool(row and row.get("v") == 1 and row.get("session") == self.state["session"]
++                    and row.get("supervisorPid") == self.state["supervisorPid"])
++
++    def restart_crashes(self, proc):
++        """An exit code alone cannot request a restart; metadata binds the old child."""
++        if proc.returncode != RESTART_CODE:
++            return None
++        row = read_json(self.runtime / RESTART)
++        if (not row or row.get("v") != 1 or row.get("session") != self.state["session"]
++                or row.get("driverPid") != proc.pid):
++            return None
++        crashes = row.get("crashes")
++        if (not isinstance(crashes, list) or not 1 <= len(crashes) <= 100
++                or any(isinstance(value, bool) or not isinstance(value, (int, float))
++                       or not math.isfinite(value) for value in crashes)):
++            return None
++        # live.py has already applied the existing 2 s / 60 s backoff. Preserve
++        # that crash window and configuration in the next OWNED child.
++        if any(value > time.time() + 5 or value < time.time() - 190 for value in crashes):
++            return None
++        try:
++            (self.runtime / RESTART).unlink()
++        except OSError:
++            return None
++        return crashes
++
++    def finish(self, code):
++        self.state.update(phase="stopped" if code == 0 else "failed", exitCode=code,
++                          cleanupComplete=not self.cleanup_failed)
++        self.save()
++
++
++def request_restart(crashes):
++    """Called only by live.py's established recovery path under this supervisor."""
++    session = os.environ.get("MM_WINDOWS_SUPERVISOR_SESSION", "")
++    path = os.environ.get("MM_WINDOWS_SUPERVISOR_RESTART_PATH", "")
++    if len(session) != 32 or not path:
++        raise RuntimeError("supervised restart ownership metadata is missing")
++    write_json(path, {"v": 1, "session": session, "driverPid": os.getpid(),
++                      "crashes": crashes})
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("action", choices=("serve", "stop"))
++    parser.add_argument("--runtime-dir", type=Path, default=Path.home() / ".livemind")
++    parser.add_argument("--session")
++    parser.add_argument("--dryrun", action="store_true")
++    parser.add_argument("--duration", type=float, default=0)
++    args = parser.parse_args(argv)
++    if args.action == "stop":
++        return stop(args.runtime_dir)
++    if not args.session or len(args.session) != 32 or any(c not in "0123456789abcdef" for c in args.session):
++        parser.error("serve requires a session identifier from the launcher")
++    if sys.platform != "win32" and not args.dryrun:
++        parser.error("non-Windows fixtures require --dryrun")
++    try:
++        with ownership_lock(args.runtime_dir):
++            owner = Owner(args.runtime_dir, args.session)
++            import windows_launcher
++            forwarded = ["--runtime-dir", str(args.runtime_dir)]
++            if args.dryrun:
++                forwarded += ["--dryrun", "--duration", str(args.duration)]
++            result = windows_launcher.main(forwarded, owner=owner)
++            owner.finish(result)
++            return result
++    except (OSError, ValueError) as error:
++        print(f"mini-mouth: supervisor refused or failed: {error}", file=sys.stderr, flush=True)
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- a/mini-mouth/live.py
++++ b/mini-mouth/live.py
+@@ -491,6 +491,7 @@
+ # stays valid), the graph carries mute/history, and the crash counter rides in
+ # the environment so the never-stay-down backoff survives the exec.
+ crashes = [float(t) for t in os.environ.get("MM_RESUME_CRASHES", "").split(",") if t]
++_exit_status = 0
+ try:
+     try:
+         asyncio.run(Driver(mouth).run())
+@@ -531,9 +532,33 @@
+         sub.cancel()
+         env = dict(os.environ, MM_RESUME_CRASHES=",".join(f"{t:.0f}" for t in crashes))
+         sys.stdout.flush(); sys.stderr.flush()
++        if os.name == "nt" and os.environ.get("MM_WINDOWS_SUPERVISOR_SESSION"):
++            # Windows exec creates another PID. Hand recovery back to the owner
++            # instead, so window-independent supervision and mm stop keep owning it.
++            from windows_supervisor import RESTART_CODE, request_restart
++            request_restart(crashes)
++            raise SystemExit(RESTART_CODE)
+         os.execve(sys.executable, [sys.executable, "-u", os.path.abspath(__file__)], env)
+ except KeyboardInterrupt:
+-    print("\nbye")
++    print("\nbye", flush=True)
++except SystemExit as requested_exit:
++    code = requested_exit.code
++    _exit_status = code if isinstance(code, int) else (0 if code is None else 1)
++    if code not in (None, 0, 75):
++        print(f"[driver exit: {code}]", file=sys.stderr, flush=True)
++except BaseException as fatal:
++    # SystemExit credentials, genuine task cancellation and failed exec are not
++    # successful stops. The forced process exit must preserve their real outcome.
++    _exit_status = 1
++    import traceback as _tb
++    print(f"[driver fatal: {type(fatal).__name__}]", file=sys.stderr, flush=True)
++    _tb.print_exception(type(fatal), fatal, fatal.__traceback__)
+ finally:
+-    sub.cancel()
+-    os._exit(0)
++    try:
++        sub.cancel()
++    except Exception as cleanup_error:
++        _exit_status = _exit_status or 1
++        print(f"[driver shutdown cleanup failed: {type(cleanup_error).__name__}]", file=sys.stderr, flush=True)
++    sys.stdout.flush()
++    sys.stderr.flush()
++    os._exit(_exit_status)
+--- a/mini-mouth/mm
++++ b/mini-mouth/mm
+@@ -8,6 +8,7 @@
+     mm asks active|idle <ID>   mark a lane started/ended (EVA's writer, --by $MM_ORGAN)
+     mm text [--from magicui] "<words>"   a typed turn that IS him speaking
+     mm context "<line>"  preload a fact the mouth absorbs and never says
++    mm stop              stop the owned Windows background call (observed cleanup)
+     mm restart           QUEUE a clean relaunch — returns at once, a detached holder waits
+                          for his quiet moment (--wait N blocks instead; mm receipt reads it)
+     mm log [N]           last N driver log lines (default 30)
+@@ -10465,6 +10466,12 @@
+         print(__doc__.strip())
+         return 0
+     verb, rest = argv[0], argv[1:]
++    if verb == "stop":
++        if sys.platform != "win32":
++            print("mm stop: this verb controls the Windows background supervisor", file=sys.stderr)
++            return 2
++        import windows_supervisor
++        return windows_supervisor.main(["stop", *rest])
+     # A VERB THAT SPEAKS MUST NEVER SPEAK A FLAG. `mm text --help` queued the literal string
+     # "--help" into his live call (2026-09-08 17:31, builder) — a request to READ the interface
+     # became a turn he heard. Any unknown leading flag prints usage and sends nothing; known
+@@ -10607,7 +10614,7 @@
+         # `mm restart` legitimately waits for his quiet gate before relaunching, so its wall is
+         # that gate plus a margin rather than the flat 45s. `mm keeper` without --once is a
+         # daemon and exempts itself the same way a panel does.
+-        _limit = QUIET_MAX_WAIT_S + 120 if _verb == "restart" else None
++        _limit = QUIET_MAX_WAIT_S + 120 if _verb == "restart" else (70 if _verb == "stop" else None)
+         # `selftest` is NOT exempt: it is exactly the verb a broken box hangs. Its rows are each
+         # bounded (20s the longest) and the whole battery is seconds, so 90s is a backstop that
+         # can only fire when a device or a socket has wedged — the state it exists to report.
+--- a/mini-mouth/app/run.ps1
++++ b/mini-mouth/app/run.ps1
+@@ -9,8 +9,9 @@
+ $env:PYTHONIOENCODING = 'utf-8'
+ $env:MM_BARGE = '0'
+ if (-not ($args -contains '--dryrun')) {
++    $global:LASTEXITCODE = 0
+     & $pythonPath (Join-Path $projectRoot 'src\credential_check.py')
+-    $credentialStatus = $LASTEXITCODE
++    $credentialStatus = $global:LASTEXITCODE
+     if ($credentialStatus -eq 2) {
+         $key = Read-Host 'OpenAI API key (hidden; or Ctrl-C and log in with your own Codex account)' -AsSecureString
+         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($key)
+@@ -21,8 +22,9 @@
+     }
+ }
+ try {
++    $global:LASTEXITCODE = 0
+     & $pythonPath (Join-Path $projectRoot 'src\windows_launcher.py') @args
+-    $code = $LASTEXITCODE
++    $code = $global:LASTEXITCODE
+ } finally {
+     if ($key) { Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue }
+ }
+--- a/mini-mouth/pyproject.toml
++++ b/mini-mouth/pyproject.toml
+@@ -14,4 +14,4 @@
+ 
+ [tool.setuptools]
+ package-dir = {"" = "src"}
+-py-modules = ["accounts_tool", "app_resolver", "atlas_tool", "audio_io", "caps_gate", "clipboard_tool", "context_tool", "credential_check", "dictate_tool", "emoji_queue", "errors", "garble_gate", "install_check", "keeper", "live_wall", "mic_doctor", "mic_health", "mm_esc_win", "mm_platform", "open_chain", "open_index", "organ_voice", "praise_gate", "queue_law", "quick_agent", "quick_tool", "relay_tool", "rt_driver", "say_reason", "segment_gate", "selftest", "speech_queue", "swap_bridge", "sync_report", "tap_log", "tick_queue", "turn_archive", "turn_latch", "ui_api", "watch_tool", "whisper_worker", "windows_launcher", "xomouth"]
++py-modules = ["accounts_tool", "app_resolver", "atlas_tool", "audio_io", "caps_gate", "clipboard_tool", "context_tool", "credential_check", "dictate_tool", "emoji_queue", "errors", "garble_gate", "install_check", "keeper", "live_wall", "mic_doctor", "mic_health", "mm_esc_win", "mm_platform", "open_chain", "open_index", "organ_voice", "praise_gate", "queue_law", "quick_agent", "quick_tool", "relay_tool", "rt_driver", "say_reason", "segment_gate", "selftest", "speech_queue", "swap_bridge", "sync_report", "tap_log", "tick_queue", "turn_archive", "turn_latch", "ui_api", "watch_tool", "whisper_worker", "windows_launcher", "windows_supervisor", "xomouth"]
