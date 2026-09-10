@@ -1,182 +1,167 @@
-MANIFEST — mini-mouth Windows candidate (2026-09-11 r2)
-
-bundle: mini-mouth-windows-candidate-2026-09-11-r2.tar.gz
-size:   852564 bytes (gzip)
-sha256: 4a32983c40de9db8805e2379f2fdf593d93f20678e8cc1290f65843b643151a3
-zip: mini-mouth-windows-candidate-2026-09-11-r2.zip
-zip sha256: 8da24f1dd48184a60609b378a2f4c73a74af97b4380c2b64755ecc0b41fc5e9a
-source: mini-mouth cumulative Windows port ef1781d and XO working tree; local rescue overlay.
-        with the r2 privacy edits applied to the bundle copy only (see build_bundle.py).
-
-166 files
-
-     bytes  path
-------------------------------------------------------------
-      3286  Install.ps1
-      4705  SETUP-WINDOWS.md
-       123  Start.cmd
-       190  XO/.gitignore
-     24543  XO/ARCHITECTURE.md
-      4576  XO/CAPABILITIES.md
-      4528  XO/CHANGELOG.md
-      8032  XO/DEVELOPMENT_PLAN.md
-      8397  XO/LANGUAGE_SUPPORT.md
-      1065  XO/LICENSE
-      7981  XO/PRODUCT.md
-     15999  XO/README.md
-      2604  XO/assets/banner.svg
-      2341  XO/assets/favicon-64.png
-       376  XO/assets/favicon.svg
-      2078  XO/benchmarks/benchmark_core.py
-      4487  XO/benchmarks/check_budgets.py
-      5874  XO/index.html
-      3448  XO/js/xo.d.ts
-     30151  XO/js/xo.js
-     12539  XO/js/xo.test.js
-      1059  XO/package.json
-      1659  XO/pyproject.toml
-       494  XO/scripts/verify-matrix.sh
-      1403  XO/scripts/verify_python.py
-      6114  XO/src/xo/__init__.py
-       428  XO/src/xo/backends/__init__.py
-       569  XO/src/xo/backends/base.py
-      2147  XO/src/xo/backends/capability.py
-     54032  XO/src/xo/backends/redis.py
-     11968  XO/src/xo/capabilities.py
-      8439  XO/src/xo/cli.py
-      6161  XO/src/xo/codec.py
-     13868  XO/src/xo/compat.py
-      2261  XO/src/xo/conformance.py
-     39812  XO/src/xo/core.py
-      3426  XO/src/xo/events.py
-      2800  XO/src/xo/exceptions.py
-     10526  XO/src/xo/formula.py
-      6704  XO/src/xo/history.py
-      1624  XO/src/xo/path.py
-      1264  XO/src/xo/profiles.py
-      1878  XO/src/xo/projection.py
-         0  XO/src/xo/py.typed
-       831  XO/src/xo/rpc/__init__.py
-     15477  XO/src/xo/rpc/client.py
-     13353  XO/src/xo/rpc/protocol.py
-     19418  XO/src/xo/rpc/server.py
-      3177  XO/src/xo/service.py
-      2391  XO/src/xo/validation.py
-       298  XO/src/xo/web/__init__.py
-     44515  XO/src/xo/web/websocket.py
-     10759  XO/src/xo/wire.py
-       820  XO/tests/fixtures/language_parity.json
-      2682  XO/tests/helpers/javascript_parity_peer.js
-      1142  XO/tests/test_backend.py
-      1007  XO/tests/test_builtins.py
-      3477  XO/tests/test_capabilities.py
-      1438  XO/tests/test_cli.py
-      6849  XO/tests/test_compat.py
-       957  XO/tests/test_conformance.py
-      4535  XO/tests/test_core.py
-      1957  XO/tests/test_fusion.py
-      6804  XO/tests/test_language_parity.py
-      1236  XO/tests/test_profiles.py
-      9768  XO/tests/test_redis.py
-      6957  XO/tests/test_rpc.py
-      5096  XO/tests/test_semantics.py
-       999  XO/tests/test_service.py
-     12102  XO/tests/test_websocket.py
-      2663  XO/tests/test_wire.py
-     10477  XO/uv.lock
-     15821  XO/vision_overhaul.md
-       412  mini-mouth/.gitignore
-     20188  mini-mouth/ARCHITECTURE.md
-      1063  mini-mouth/LICENSE
-       519  mini-mouth/README.md
-      2463  mini-mouth/app/build.sh
-      2031  mini-mouth/app/mini-mouth.applescript
-      1094  mini-mouth/app/run.ps1
-      7585  mini-mouth/app/run.sh
-    232291  mini-mouth/asks_tui.py
-      1381  mini-mouth/bin/mic-vpio-alive.sh
-     32709  mini-mouth/live.py
-    548380  mini-mouth/mm
-       261  mini-mouth/mm.cmd
-      1212  mini-mouth/pyproject.toml
-       708  mini-mouth/requirements.txt
-      9292  mini-mouth/src/accounts_tool.py
-     22955  mini-mouth/src/app_resolver.py
-     11219  mini-mouth/src/atlas_tool.py
-     24038  mini-mouth/src/audio_io.py
-     17024  mini-mouth/src/caps_gate.py
-      7304  mini-mouth/src/clipboard_tool.py
-      3686  mini-mouth/src/context_tool.py
-      6895  mini-mouth/src/dictate_tool.py
-      2850  mini-mouth/src/emoji_queue.py
-      5950  mini-mouth/src/errors.py
-     15722  mini-mouth/src/garble_gate.py
-       465  mini-mouth/src/install_check.py
-      8409  mini-mouth/src/keeper.py
-      6080  mini-mouth/src/live_wall.py
-      5558  mini-mouth/src/mic_doctor.py
-      4130  mini-mouth/src/mic_health.py
-      1784  mini-mouth/src/mm-caps.swift
-      4360  mini-mouth/src/mm-esc.swift
-      6171  mini-mouth/src/mm_esc_win.py
-     24003  mini-mouth/src/mm_platform.py
-     14698  mini-mouth/src/mm_platform_test.py
-     24928  mini-mouth/src/open_chain.py
-     14812  mini-mouth/src/open_index.py
-      3803  mini-mouth/src/organ_voice.py
-      4598  mini-mouth/src/praise_gate.py
-      2683  mini-mouth/src/queue_law.py
-      9811  mini-mouth/src/quick_agent.py
-      8809  mini-mouth/src/quick_tool.py
-      7576  mini-mouth/src/relay_tool.py
-    355509  mini-mouth/src/rt_driver.py
-      1913  mini-mouth/src/say_reason.py
-     15334  mini-mouth/src/segment_gate.py
-     23765  mini-mouth/src/selftest.py
-      6375  mini-mouth/src/speech_queue.py
-      9775  mini-mouth/src/swap_bridge.py
-      6230  mini-mouth/src/sync_report.py
-      9535  mini-mouth/src/tap_log.py
-      4659  mini-mouth/src/tick_queue.py
-     14091  mini-mouth/src/turn_archive.py
-      3433  mini-mouth/src/turn_latch.py
-     14610  mini-mouth/src/ui_api.py
-      7281  mini-mouth/src/watch_tool.py
-      6536  mini-mouth/src/whisper_worker.py
-      6308  mini-mouth/src/windows_launcher.py
-      7158  mini-mouth/src/xomouth.py
-    134747  mini-mouth/tui.py
-        26  mini-mouth/tui2/.gitignore
-     16650  mini-mouth/tui2/JUDGEMENT.md
-     24482  mini-mouth/tui2/PLAN.md
-     15912  mini-mouth/tui2/README.md
-     51006  mini-mouth/tui2/app.py
-      8625  mini-mouth/tui2/banner.py
-      5821  mini-mouth/tui2/config.py
-       781  mini-mouth/tui2/fixtures/barge.jsonl
-       551  mini-mouth/tui2/fixtures/boot.jsonl
-       689  mini-mouth/tui2/fixtures/close.jsonl
-       220  mini-mouth/tui2/fixtures/deaf.jsonl
-       782  mini-mouth/tui2/fixtures/demo.jsonl
-       780  mini-mouth/tui2/fixtures/ui.jsonl
-      2910  mini-mouth/tui2/karaoke.py
-      5210  mini-mouth/tui2/layout.py
-      4726  mini-mouth/tui2/panels.py
-     15309  mini-mouth/tui2/rows.py
-      2397  mini-mouth/tui2/rtl.py
-       968  mini-mouth/tui2/run
-     35335  mini-mouth/tui2/selftest.py
-      7100  mini-mouth/tui2/source.py
-      2687  mini-mouth/tui2/sticky.py
-      2126  mini-mouth/tui2/term_reset.py
-      3482  mini-mouth/tui2/tests_reload_pty.py
-      4615  mini-mouth/tui2/tests_term_pty.py
-      9571  mini-mouth/tui2/tests_writes.py
-      1158  mini-mouth/tui2/tui2.tcss
-      8890  mini-mouth/tui2/writes.py
-    132692  mini-mouth/tui_asks.py
-     12072  mini-mouth/tui_gaps.py
-     43398  mini-mouth/tui_panels.py
-      1000  mini-mouth/watch.py
-------------------------------------------------------------
-   2714105  TOTAL (uncompressed)
+Install.ps1
+SETUP-WINDOWS.md
+Start.cmd
+XO/.gitignore
+XO/ARCHITECTURE.md
+XO/CAPABILITIES.md
+XO/CHANGELOG.md
+XO/DEVELOPMENT_PLAN.md
+XO/LANGUAGE_SUPPORT.md
+XO/LICENSE
+XO/PRODUCT.md
+XO/README.md
+XO/assets/banner.svg
+XO/assets/favicon-64.png
+XO/assets/favicon.svg
+XO/benchmarks/benchmark_core.py
+XO/benchmarks/check_budgets.py
+XO/index.html
+XO/js/xo.d.ts
+XO/js/xo.js
+XO/js/xo.test.js
+XO/package.json
+XO/pyproject.toml
+XO/scripts/verify-matrix.sh
+XO/scripts/verify_python.py
+XO/src/xo/__init__.py
+XO/src/xo/backends/__init__.py
+XO/src/xo/backends/base.py
+XO/src/xo/backends/capability.py
+XO/src/xo/backends/redis.py
+XO/src/xo/capabilities.py
+XO/src/xo/cli.py
+XO/src/xo/codec.py
+XO/src/xo/compat.py
+XO/src/xo/conformance.py
+XO/src/xo/core.py
+XO/src/xo/events.py
+XO/src/xo/exceptions.py
+XO/src/xo/formula.py
+XO/src/xo/history.py
+XO/src/xo/path.py
+XO/src/xo/profiles.py
+XO/src/xo/projection.py
+XO/src/xo/py.typed
+XO/src/xo/rpc/__init__.py
+XO/src/xo/rpc/client.py
+XO/src/xo/rpc/protocol.py
+XO/src/xo/rpc/server.py
+XO/src/xo/service.py
+XO/src/xo/validation.py
+XO/src/xo/web/__init__.py
+XO/src/xo/web/websocket.py
+XO/src/xo/wire.py
+XO/tests/fixtures/language_parity.json
+XO/tests/helpers/javascript_parity_peer.js
+XO/tests/test_backend.py
+XO/tests/test_builtins.py
+XO/tests/test_capabilities.py
+XO/tests/test_cli.py
+XO/tests/test_compat.py
+XO/tests/test_conformance.py
+XO/tests/test_core.py
+XO/tests/test_fusion.py
+XO/tests/test_language_parity.py
+XO/tests/test_profiles.py
+XO/tests/test_redis.py
+XO/tests/test_rpc.py
+XO/tests/test_semantics.py
+XO/tests/test_service.py
+XO/tests/test_websocket.py
+XO/tests/test_wire.py
+XO/uv.lock
+XO/vision_overhaul.md
+mini-mouth/.gitignore
+mini-mouth/ARCHITECTURE.md
+mini-mouth/LICENSE
+mini-mouth/README.md
+mini-mouth/app/build.sh
+mini-mouth/app/mini-mouth.applescript
+mini-mouth/app/run.ps1
+mini-mouth/app/run.sh
+mini-mouth/asks_tui.py
+mini-mouth/bin/mic-vpio-alive.sh
+mini-mouth/live.py
+mini-mouth/mm
+mini-mouth/mm.cmd
+mini-mouth/pyproject.toml
+mini-mouth/requirements.txt
+mini-mouth/src/accounts_tool.py
+mini-mouth/src/app_resolver.py
+mini-mouth/src/atlas_tool.py
+mini-mouth/src/audio_io.py
+mini-mouth/src/caps_gate.py
+mini-mouth/src/clipboard_tool.py
+mini-mouth/src/context_tool.py
+mini-mouth/src/credential_check.py
+mini-mouth/src/dictate_tool.py
+mini-mouth/src/emoji_queue.py
+mini-mouth/src/errors.py
+mini-mouth/src/garble_gate.py
+mini-mouth/src/install_check.py
+mini-mouth/src/keeper.py
+mini-mouth/src/live_wall.py
+mini-mouth/src/mic_doctor.py
+mini-mouth/src/mic_health.py
+mini-mouth/src/mm-caps.swift
+mini-mouth/src/mm-esc.swift
+mini-mouth/src/mm_esc_win.py
+mini-mouth/src/mm_platform.py
+mini-mouth/src/mm_platform_test.py
+mini-mouth/src/open_chain.py
+mini-mouth/src/open_index.py
+mini-mouth/src/organ_voice.py
+mini-mouth/src/praise_gate.py
+mini-mouth/src/queue_law.py
+mini-mouth/src/quick_agent.py
+mini-mouth/src/quick_tool.py
+mini-mouth/src/relay_tool.py
+mini-mouth/src/rt_driver.py
+mini-mouth/src/say_reason.py
+mini-mouth/src/segment_gate.py
+mini-mouth/src/selftest.py
+mini-mouth/src/speech_queue.py
+mini-mouth/src/swap_bridge.py
+mini-mouth/src/sync_report.py
+mini-mouth/src/tap_log.py
+mini-mouth/src/tick_queue.py
+mini-mouth/src/turn_archive.py
+mini-mouth/src/turn_latch.py
+mini-mouth/src/ui_api.py
+mini-mouth/src/watch_tool.py
+mini-mouth/src/whisper_worker.py
+mini-mouth/src/windows_launcher.py
+mini-mouth/src/xomouth.py
+mini-mouth/tui.py
+mini-mouth/tui2/.gitignore
+mini-mouth/tui2/JUDGEMENT.md
+mini-mouth/tui2/PLAN.md
+mini-mouth/tui2/README.md
+mini-mouth/tui2/app.py
+mini-mouth/tui2/banner.py
+mini-mouth/tui2/config.py
+mini-mouth/tui2/fixtures/barge.jsonl
+mini-mouth/tui2/fixtures/boot.jsonl
+mini-mouth/tui2/fixtures/close.jsonl
+mini-mouth/tui2/fixtures/deaf.jsonl
+mini-mouth/tui2/fixtures/demo.jsonl
+mini-mouth/tui2/fixtures/ui.jsonl
+mini-mouth/tui2/karaoke.py
+mini-mouth/tui2/layout.py
+mini-mouth/tui2/panels.py
+mini-mouth/tui2/rows.py
+mini-mouth/tui2/rtl.py
+mini-mouth/tui2/run
+mini-mouth/tui2/selftest.py
+mini-mouth/tui2/source.py
+mini-mouth/tui2/sticky.py
+mini-mouth/tui2/term_reset.py
+mini-mouth/tui2/tests_reload_pty.py
+mini-mouth/tui2/tests_term_pty.py
+mini-mouth/tui2/tests_writes.py
+mini-mouth/tui2/tui2.tcss
+mini-mouth/tui2/writes.py
+mini-mouth/tui_asks.py
+mini-mouth/tui_gaps.py
+mini-mouth/tui_panels.py
+mini-mouth/watch.py
