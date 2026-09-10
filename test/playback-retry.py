@@ -227,6 +227,88 @@ class RetryCandidate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read()['src'], 'mouth')
         self.assertTrue(driver._pb_retry_task.done())
 
+    def configure_run(self, session):
+        driver = self.driver
+        driver.rt = types.SimpleNamespace(spec=types.SimpleNamespace(model=types.SimpleNamespace(value='fixture')),
+                                         status=object())
+        driver.put = lambda *args: None
+        driver.watch_commands = lambda: types.SimpleNamespace(cancel=lambda: None)
+        driver.clear_liveness = lambda why: None
+        driver._session = session
+
+    async def test_late_cursor_off_cannot_cancel_the_shutdown_owned_retry(self):
+        real_replace = os.replace
+        remaining = 0
+        late_off = []
+        shutdown_tasks = []
+
+        def replace(source, target):
+            nonlocal remaining
+            if remaining:
+                remaining -= 1
+                raise PermissionError(13, 'fixture')
+            return real_replace(source, target)
+
+        async def session(*args):
+            nonlocal remaining
+            self.publish(True, 'mouth', 7)
+            remaining = 2
+
+        def late_cursor():
+            shutdown_tasks.append(self.driver._pb_retry_task)
+            late_off.append(self.publish(False, 'old-cursor'))
+
+        self.configure_run(session)
+        self.after_sleep = late_cursor
+        with patch.object(os, 'replace', side_effect=replace):
+            await self.driver.run()
+        self.assertEqual(late_off, [False, False])
+        self.assertEqual(len(set(shutdown_tasks)), 1)
+        self.assertIs(shutdown_tasks[0], self.driver._pb_retry_task)
+        self.assertFalse(self.driver._pb_retry_task.cancelled())
+        self.assertFalse(self.read()['on_air'])
+        self.assertEqual(self.read()['src'], 'mouth')
+
+    async def test_genuine_outer_cancellation_propagates_while_draining_shutdown(self):
+        async def session(*args):
+            self.publish(True, 'mouth', 7)
+
+        self.configure_run(session)
+        # A parent cancellation is different from a superseded cursor update and
+        # must not be swallowed as an ordinary metadata/shutdown timeout.
+        with patch.object(os, 'replace', side_effect=PermissionError(13, 'fixture')):
+            task = asyncio.create_task(self.driver.run())
+            self.after_sleep = task.cancel
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(task.cancelled())
+        self.assertTrue(self.driver._pb_retry_task.cancelled())
+
+    async def test_shutdown_timeout_cancels_its_retry_without_extending_deadline(self):
+        async def session(*args):
+            pass
+
+        async def blocked_sleep(delay):
+            await asyncio.Event().wait()
+
+        deadlines = []
+
+        async def bounded_wait(awaitable, timeout):
+            deadlines.append(timeout)
+            # Exercise actual wait_for cancellation with a short fixture clock;
+            # verify the production run requests its single two-second bound.
+            return await asyncio.wait_for(awaitable, timeout=.01)
+
+        self.configure_run(session)
+        namespace = self.driver.run.__func__.__globals__
+        namespace['asyncio'].sleep = blocked_sleep
+        namespace['asyncio'].wait_for = bounded_wait
+        with patch.object(os, 'replace', side_effect=PermissionError(13, 'fixture')):
+            await self.driver.run()
+        self.assertEqual(deadlines, [2.0])
+        self.assertTrue(self.driver._pb_retry_task.cancelled())
+        self.assertTrue(self.read()['on_air'], 'permanent refusal stays visible as a limitation')
+
     async def test_successful_off_does_not_leave_cancelled_task_for_shutdown_to_await(self):
         with patch.object(os, 'replace', side_effect=PermissionError(13, 'fixture')):
             self.publish(False, 'mouth')

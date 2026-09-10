@@ -10,13 +10,15 @@
          """The ENGINE's own playback publisher, the file speech-halo reads (A55).
  
          v1's engine wrote this and mini-mouth never has, so the copy on disk was hours stale
-@@ -434,6 +435,19 @@
+@@ -434,6 +435,21 @@
          a halo that cannot see the mouth is a small loss, a driver that dies publishing to it
          is not.
          """
 +        # An OFF retry belongs to one publication and one player. A later request
 +        # supersedes it even if that request itself fails to reach the file.
-+        if on_air and getattr(self, "_pb_closing", False):
++        # Shutdown owns its terminal OFF and retry task. Late ON *or OFF* cursor
++        # updates must not replace/cancel the task run() is already awaiting.
++        if getattr(self, "_pb_closing", False) and _retry_generation is None:
 +            return False
 +        if _retry_generation is None:
 +            self._pb_generation = getattr(self, "_pb_generation", 0) + 1
@@ -30,7 +32,7 @@
          try:
              # while audio is on air the LEVEL is the point, so those writes are not deduped:
              # speech-halo already divides playback.json's `level` by 28000 for its mouth-side
-@@ -441,7 +455,7 @@
+@@ -441,7 +457,7 @@
              # the half that turned out to be free).
              if not on_air and (on_air, src) == getattr(self, "_pb_last", (None, None)) and \
                      time.time() - getattr(self, "_pb_at", 0) < 1.0:
@@ -39,7 +41,7 @@
              tmp = self.PLAYBACK + ".tmp"
              os.makedirs(os.path.dirname(self.PLAYBACK), exist_ok=True)
              with open(tmp, "w", encoding="utf-8") as fh:
-@@ -452,6 +466,7 @@
+@@ -452,6 +468,7 @@
                             "call": f"mini-mouth-{os.getpid()}", "ts": now_ms()}, fh)
              os.replace(tmp, self.PLAYBACK)
              self._pb_last, self._pb_at = (on_air, src), time.time()
@@ -47,7 +49,7 @@
          except OSError as error:
              # A Windows sharing/permission failure must not look like a successful
              # update or suppress the next retry. Report no path or arbitrary text.
-@@ -461,6 +476,42 @@
+@@ -461,6 +478,42 @@
                  print(f"driver: ⚠ error playback metadata write failed ({type(error).__name__}, "
                        f"errno={error.errno}, winerror={getattr(error, 'winerror', None)})",
                        flush=True)
@@ -90,13 +92,14 @@
  
      _mic_missing_said = False
  
-@@ -4612,8 +4663,15 @@
-         finally:
-             subscription.cancel()
+@@ -4614,6 +4667,16 @@
              self.clear_liveness("closed")
-+            self._pb_closing = True  # late cursor ticks must not restore ON during shutdown
              self._pb_last = None  # shutdown must clear even after a recent idle write
              self.publish_playback(False, "mouth")
++            # No await separates the terminal publication from taking ownership.
++            # Its own generation-bound retry may proceed; ordinary cursor updates
++            # (including late OFF) must not cancel the task being drained below.
++            self._pb_closing = True
 +            pending = getattr(self, "_pb_retry_task", None)
 +            if pending is not None and not pending.done():
 +                try:
