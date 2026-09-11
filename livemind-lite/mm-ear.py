@@ -16,6 +16,8 @@ His orders (typed into the MIND session, 2026-09-08):
   bus ear (MIND, 2026-09-08 13:1x, after SPEAKSIM's dispatch line sat unread on `limbs`): the ORGAN MONITOR LAW
     ear — body + limbs + own channel, ONE LINE PER MESSAGE (canon 234: head + `lm-read <id>` pull, no chunks),
     and it writes the presence heartbeat `$BUS/.readers/<me>.hb` so `lm-connect who` shows the organ LIVE.
+  the `mirror` ear (2026-09-11, his cross-machine board ask): OFF on the Mac (the single WRITER) — a REMOTE
+    machine turns it on and hears the board PROJECTION the Mac pushes over the Agent Tunnel.
   So FOUR ears, each one monitor: `user-inputs` (his words — [Spoken] from the live log, [Typed ⌨] and
   [from MagicUI] typed turns, [Typed] from the board feed), `system` (driver run headers + pid changes + ⚠ errors), `board` (asks events targeting
   me + his thread comments on my asks). An ear may read several files; it is one process, one stream.
@@ -26,6 +28,8 @@ His orders (typed into the MIND session, 2026-09-08):
     lm-ear all [--only a,b]     # every enabled ear in one process, lines tagged [ear] (no-Monitor harness)
     lm-ear list                 # ears from the config with enabled state + params
     lm-ear config [init]        # show the config (init = write the defaults)
+    lm-ear config enable|disable <ear>   # flip one ear in the config file and print the re-arm line
+    lm-ear --mirror-selftest    # EXECUTE the board-mirror rule on fixtures (own temp state); rc 0/1
     lm-ear --selftest [ear]     # replay each ear's filter over its LAST REAL LINES; rc 0 if every ear fires
     lm-ear ack <ASK-ID> [note]  # the MIND's `ack` event on the board
     lm-ear --profile eva …      # PROFILES (his order to EVA 2026-09-08 sha:9f781406, board A202): the same ears
@@ -51,6 +55,7 @@ import subprocess, re, os, sys, time, json, glob
 
 CONFIG = os.environ.get("LM_EARS") or os.path.expanduser("~/.livemind/ears.json")
 SEEN_DIR = os.path.expanduser(os.environ.get("LM_EAR_SEEN_DIR") or "~/.livemind/ears/seen")
+MIRROR_PATH = os.path.join(os.path.dirname(CONFIG), "board-mirror.json")   # the last board mirror this machine received (the mirror ear diffs against it)
 H = os.path.expanduser
 DEFAULTS = {
     "version": 3, "me": "mind",
@@ -61,6 +66,8 @@ DEFAULTS = {
                    "log": H("~/.livemind/mini-mouth-live.log"), "pidfile": H("~/.livemind/mini-mouth.pid"), "cut": 700},
         "board":  {"enabled": False, "desc": "the asks board — disabled in LiveMind-lite; belongs to the full LiveMind body",
                    "docs": H("~/Creations/mini-mouth/docs"), "cut": 700},
+        "mirror": {"enabled": False, "desc": "the asks-board MIRROR pushed over the Agent Tunnel (remote machines only) — [Board mirror] <id> <status> <title> on change",
+                   "inbox": None, "cut": 400},   # OFF on the Mac (the writer); a remote MIND-lite turns it on with `lm-ear config enable mirror`
         "bus":    {"enabled": False, "desc": "the organ bus — disabled in LiveMind-lite; belongs to the full LiveMind body",
                    "bus": H("~/.livemind/bus"), "channels": ["body", "limbs"], "cut": 400},   # own channel = the profile's `me` unless the profile overrides
     },
@@ -368,7 +375,181 @@ def bus_heartbeat(cfg, me):
                        "max_parts": 1, "inline": cfg["cut"], "pace_ms": 0, "pull": "lm-read <id>"}, f)
     except OSError as ex: out(f"bus heartbeat FAILED: {ex!r}")
 
-EARS = {"user-inputs": ear_user_inputs, "system": ear_system, "board": ear_board, "bus": ear_bus}
+# ---------------------------------------------------------------- the board mirror (remote machines)
+# The Mac is the single WRITER of the asks board; an allowed machine receives a PROJECTION of it over the
+# Agent Tunnel as one inbox line `BOARD-MIRROR {json}` (`lm-tunnels board push <label>`). This ear turns that
+# into ONE line naming what changed, and keeps the last mirror on disk so the next diff has something to
+# compare against. It never writes the board — a remote has no board to write.
+# Inbox layout OPENED, not assumed: p2p-stable-v0.3.6/src/tunnel.js:259-269 `tunnelDir` =
+#   <P2P_HOME | (win ? %USERPROFILE% : ~)/.p2p>/tunnel/<name>/ ; bin/p2p-tunnel.js:76-83 `current.json` -> {id},
+#   session dir <root>/<id>/, bin/p2p-tunnel.js:74 files() -> inbox.jsonl ; `--name` defaults to 'default'
+#   (bin/p2p-tunnel.js:278). Rows: {v,id,t,text,from,rx[,channel]}; channel is absent for chat and 'term' for
+#   terminal output (bin/p2p-tunnel.js:204-212) — term rows are skipped here as they are everywhere else.
+# `recv` keeps its own cursor in offset.json (bin/p2p-tunnel.js:409-416), so reading inbox.jsonl by our own
+# byte offset never disturbs the remote agent's own reads.
+def _mirror_inbox(cfg):
+    """The tunnel inbox this machine receives on. Explicit `inbox` wins; else the NEWEST session inbox under
+    <P2P_HOME|~/.p2p or %USERPROFILE%/.p2p>/tunnel/*/current.json -> <id>/inbox.jsonl. None = nothing to follow."""
+    if cfg.get("inbox"): return H(cfg["inbox"])
+    base = os.environ.get("P2P_HOME") or os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), ".p2p")
+    best = None
+    for cur in glob.glob(os.path.join(base, "tunnel", "*", "current.json")):
+        try:
+            with open(cur) as f: ptr = json.load(f)
+            inbox = os.path.join(os.path.dirname(cur), str(ptr.get("id", "")), "inbox.jsonl")
+            mt = os.path.getmtime(inbox)
+        except Exception: continue
+        if best is None or mt > best[0]: best = (mt, inbox)
+    return best[1] if best else None
+
+def _mirror_key(r):
+    return (str(r.get("status", "")), str(r.get("title", "")), str(r.get("owner", "")))
+
+def _mirror_load():
+    """The last mirror on disk as {id: record}. Unreadable/absent = {} (the first mirror then reads as all-new)."""
+    try:
+        with open(MIRROR_PATH, encoding="utf-8") as f: d = json.load(f)
+        return {str(r.get("id")): r for r in (d.get("records") or []) if isinstance(r, dict) and r.get("id")}
+    except Exception: return {}
+
+def _mirror_write(payload):
+    d = os.path.dirname(MIRROR_PATH)
+    if d: os.makedirs(d, exist_ok=True)
+    tmp = MIRROR_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(payload, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, MIRROR_PATH)
+
+def _mirror_cls(cfg):
+    state = {"prev": None}   # loaded from MIRROR_PATH on the first mirror, not at import: the file may appear later
+    def cls(l):
+        if not l.strip(): return None
+        try: e = json.loads(l)
+        except Exception: return None
+        if e.get("channel") == "term": return None
+        text = str(e.get("text", ""))
+        if not text.startswith("BOARD-MIRROR "): return None
+        if state["prev"] is None: state["prev"] = _mirror_load()
+        try: m = json.loads(text[len("BOARD-MIRROR "):])
+        except Exception: m = None
+        if not isinstance(m, dict): return "[Board mirror] REFUSED unparsable mirror"   # MIRROR_PATH untouched
+        recs = [r for r in (m.get("records") or []) if isinstance(r, dict) and r.get("id")]
+        cur = {str(r["id"]): r for r in recs}; prev = state["prev"]
+        named = []
+        for rid, r in cur.items():
+            if rid not in prev or _mirror_key(r) != _mirror_key(prev[rid]):
+                named.append(f"{rid} {r.get('status', '?')} {str(r.get('title', ''))[:40]}")
+        for rid, r in prev.items():
+            if rid not in cur: named.append(f"{rid} REMOVED {str(r.get('title', ''))[:40]}")
+        try: _mirror_write(m)
+        except OSError as ex: return f"[Board mirror] WRITE FAILED {MIRROR_PATH}: {ex!r}"[: cfg["cut"]]
+        state["prev"] = cur
+        head = f"[Board mirror] {len(recs)} records from {m.get('sender', '?')} @ {m.get('generated', '?')}: "
+        if not named: return (head + "no change")[: cfg["cut"]]
+        body = "; ".join(named[:6]) + (f" +{len(named) - 6} more — read {MIRROR_PATH}" if len(named) > 6 else "")
+        return (head + f"{len(named)} changed — " + body)[: cfg["cut"]]
+    return cls
+
+def ear_mirror(cfg, me):
+    inbox = _mirror_inbox(cfg)
+    if not inbox:
+        out("EAR mirror: no tunnel inbox found"); return []   # visible, never a silent empty ear
+    c = _mirror_cls(cfg)
+    return [(inbox, c, lambda: [l for l in _tail_lines(inbox)[-200:] if "BOARD-MIRROR " in l][-1:])]
+
+def mirror_selftest():
+    """`lm-ear --mirror-selftest` — EXECUTE the mirror rule on fixtures: one clean row, two mirrors, a removal,
+    a bad one, a term row, a repeat. Its own temp MIRROR_PATH, so it can never touch this machine's
+    board-mirror.json. Non-halting: rc 0 when every leg is ok, 1 otherwise (the failing legs are named)."""
+    import tempfile, shutil
+    global MIRROR_PATH
+    saved = MIRROR_PATH; d = tempfile.mkdtemp(prefix="lm-mirror-selftest-")
+    MIRROR_PATH = os.path.join(d, "board-mirror.json")
+    legs = []
+    def leg(name, ok, detail=""):
+        legs.append(ok); out(f"mirror-selftest: {'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail else ""))
+    def row(**kw):
+        base = {"v": 1, "id": kw.pop("mid", "m"), "from": "PEER"}; base.update(kw); return json.dumps(base, ensure_ascii=False)
+    def mirror(gen, records):
+        return "BOARD-MIRROR " + json.dumps({"generated": gen, "sender": "mac:Test", "count": len(records), "records": records}, ensure_ascii=False)
+    A1 = {"id": "A1", "title": "first", "status": "open", "owner": "mind"}
+    A2o = {"id": "A2", "title": "second", "status": "open", "owner": "eva"}
+    A2d = {"id": "A2", "title": "second", "status": "done", "owner": "eva"}
+    try:
+        cls = _mirror_cls({"cut": 400})
+        r0 = cls(row(mid="m0", text="hello from the PC"))
+        leg("CLEAN: a plain chat row is not a mirror", r0 is None, repr(r0))
+        r1 = cls(row(mid="m1", text=mirror("T0", [A1, A2o])))
+        leg("first mirror names both records as changed", bool(r1) and "2 changed" in r1 and "A1 open" in r1 and "A2 open" in r1, repr(r1))
+        after1 = _mirror_load()
+        leg("MIRROR_PATH rewritten by the first mirror", sorted(after1) == ["A1", "A2"] and after1.get("A2", {}).get("status") == "open", repr(sorted(after1)))
+        r2 = cls(row(mid="m2", text=mirror("T1", [A1, A2d])))
+        leg("second mirror names exactly A2 done", bool(r2) and "1 changed" in r2 and "A2 done" in r2 and "A1" not in r2, repr(r2))
+        after2 = _mirror_load()
+        leg("MIRROR_PATH rewritten to the newest", after2.get("A2", {}).get("status") == "done", repr(after2.get("A2")))
+        r3 = cls(row(mid="m3", text=mirror("T2", [A1])))
+        leg("a removed record is named", bool(r3) and "A2 REMOVED" in r3, repr(r3))
+        def onbytes():   # a MISSING file is a value, not a crash: a sabotage that stops the write must be REPORTED, never raise
+            try: return open(MIRROR_PATH, "rb").read()
+            except OSError: return None
+        before = onbytes()
+        r4 = cls(row(mid="m4", text="BOARD-MIRROR {not json"))
+        leg("REFUSED unparsable mirror", r4 == "[Board mirror] REFUSED unparsable mirror", repr(r4))
+        leg("MIRROR_PATH unchanged by the unparsable mirror", onbytes() == before)
+        r5 = cls(row(mid="m5", channel="term", text=mirror("T3", [A1, A2d])))
+        leg("a term-channel row is skipped", r5 is None, repr(r5))
+        r6 = cls(row(mid="m6", text=mirror("T4", [A1])))
+        leg("an identical mirror says no change", bool(r6) and r6.endswith("no change"), repr(r6))
+        # inbox RESOLUTION — a path that can fail silently otherwise (the layout is p2p's, opened above)
+        home = os.path.join(d, "p2p"); sess = "deadbeef" * 4
+        os.makedirs(os.path.join(home, "tunnel", "default", sess))
+        with open(os.path.join(home, "tunnel", "default", "current.json"), "w") as f: json.dump({"id": sess}, f)
+        inbox = os.path.join(home, "tunnel", "default", sess, "inbox.jsonl")
+        with open(inbox, "w", encoding="utf-8") as f:
+            f.write(row(mid="i0", text="plain hello") + "\n" + row(mid="i1", text=mirror("T5", [A1, A2d])) + "\n")
+        leg("explicit cfg inbox wins", _mirror_inbox({"inbox": inbox}) == inbox)
+        old_home = os.environ.get("P2P_HOME"); os.environ["P2P_HOME"] = home
+        try:
+            leg("inbox resolved from P2P_HOME/tunnel/<name>/current.json", _mirror_inbox({"inbox": None}) == inbox, repr(_mirror_inbox({"inbox": None})))
+            srcs = ear_mirror({"inbox": None, "cut": 400}, "mind")
+            hits = [s[1](l) for s in srcs for l in s[2]()]
+            # one source, one hit: the window keeps only the LAST BOARD-MIRROR row, and the plain row never fires.
+            # A2 (not A1) is named because a fresh cls diffs against MIRROR_PATH, which the legs above left holding {A1}.
+            leg("ear_mirror's selftest window fires on the last BOARD-MIRROR row only", len(srcs) == 1 and len(hits) == 1 and bool(hits[0]) and "A2 done" in hits[0], repr(hits))
+            os.environ["P2P_HOME"] = os.path.join(d, "nothing-here")
+            leg("no tunnel inbox -> ear_mirror returns no sources", ear_mirror({"inbox": None, "cut": 400}, "mind") == [])
+        finally:
+            if old_home is None: os.environ.pop("P2P_HOME", None)
+            else: os.environ["P2P_HOME"] = old_home
+        # `config enable|disable <ear>` — run as a SUBPROCESS against a scratch config, never this machine's
+        ecfg = os.path.join(d, "ears.json")
+        with open(ecfg, "w", encoding="utf-8") as f: json.dump(DEFAULTS, f, indent=2, ensure_ascii=False)
+        env = dict(os.environ, LM_EARS=ecfg)
+        def run(*a):
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), *a], env=env, capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+        def others(t): return [x for x in t.splitlines() if x.startswith("Monitor(") and '"lm-ear mirror"' not in x]
+        rc0, base = run()
+        rc1, o1 = run("config", "enable", "mirror")
+        leg("config enable mirror: rc 0 + the re-arm line", rc1 == 0 and "mirror enabled=True" in o1 and 'Monitor({command:"lm-ear mirror"' in o1, o1.strip()[-90:])
+        leg("config enable mirror: enabled true on disk", json.load(open(ecfg))["ears"]["mirror"]["enabled"] is True)
+        rc2, o2 = run()
+        leg("the plan now carries the mirror monitor", rc2 == 0 and 'command: "lm-ear mirror"' in o2)
+        rc3, o3 = run("config", "disable", "mirror")
+        leg("config disable mirror: rc 0", rc3 == 0 and "mirror enabled=False" in o3, o3.strip()[-90:])
+        rc4, o4 = run()
+        leg("the plan prints `# OFF: mirror` again", rc4 == 0 and "# OFF: mirror" in o4)
+        leg("every OTHER ear's monitor line is byte-identical to the baseline", rc0 == 0 and others(o4) == others(base) and len(others(base)) >= 1)
+        rc5, o5 = run("config", "enable", "nosuch")
+        leg("config enable <unknown ear>: rc 2, nothing written", rc5 == 2 and "unknown ear 'nosuch'" in o5 and "mirror" not in json.dumps(json.load(open(ecfg))["ears"].get("nosuch", {})), o5.strip()[-60:])
+        rc6, o6 = run("config", "enable")
+        leg("config enable with no ear name: rc 2 usage", rc6 == 2 and "usage: lm-ear config enable <ear>" in o6, o6.strip()[-60:])
+    finally:
+        MIRROR_PATH = saved; shutil.rmtree(d, ignore_errors=True)
+    bad = legs.count(False)
+    out(f"mirror-selftest: {len(legs) - bad}/{len(legs)} legs ok")
+    return 1 if bad else 0
+
+EARS = {"user-inputs": ear_user_inputs, "system": ear_system, "board": ear_board, "bus": ear_bus, "mirror": ear_mirror}
 
 def write_event(docs, me, aid, event, **extra):
     row = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "id": aid, "who": me, "event": event}; row.update(extra)
@@ -565,6 +746,7 @@ def plan(cfg, only=None, as_json=False, tag=""):
     out("# each prints selftest: lines + EAR ARMED before its first live line — if those did not reach you, it is not armed")
 
 def main(argv):
+    if argv[:1] == ["--mirror-selftest"]: return mirror_selftest()   # before load_config: it must never write a config
     cfg = load_config()
     prof = os.environ.get("LM_EAR_PROFILE") or "mind"
     if "--profile" in argv:
@@ -591,6 +773,22 @@ def main(argv):
             e = cfg["ears"].get(n, {}); out(f"{n:8s} {'on ' if e.get('enabled', True) else 'off'}  {e.get('desc','')}")
         return 0
     if a == "config":
+        if len(argv) > 2 and argv[1] in ("enable", "disable"):
+            ear = argv[2]
+            if ear not in EARS: out(f"unknown ear '{ear}' — ears: {', '.join(EARS)}"); return 2
+            try:
+                with open(CONFIG, encoding="utf-8") as f: raw = json.load(f)
+            except Exception: raw = json.loads(json.dumps(DEFAULTS))
+            want = argv[1] == "enable"
+            raw.setdefault("ears", {}).setdefault(ear, json.loads(json.dumps(DEFAULTS["ears"][ear])))["enabled"] = want
+            d = os.path.dirname(CONFIG)
+            if d: os.makedirs(d, exist_ok=True)
+            with open(CONFIG + ".tmp", "w", encoding="utf-8") as f: json.dump(raw, f, indent=2, ensure_ascii=False)
+            os.replace(CONFIG + ".tmp", CONFIG)
+            out(f'wrote {CONFIG}: {ear} enabled={want} — re-arm: Monitor({{command:"lm-ear {ear}", persistent:true}})')
+            return 0
+        if len(argv) > 1 and argv[1] in ("enable", "disable"):
+            out(f"usage: lm-ear config {argv[1]} <ear>   (ears: {', '.join(EARS)})"); return 2
         if len(argv) > 1 and argv[1] == "init":
             os.makedirs(os.path.dirname(CONFIG), exist_ok=True); json.dump(DEFAULTS, open(CONFIG, "w"), indent=2, ensure_ascii=False); out(f"wrote {CONFIG}")
         else:
